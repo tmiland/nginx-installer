@@ -5,6 +5,7 @@
 
 
  ## Usage
+ - Note: Use either headless or extra modules option
  ```bash
  Usage:  nginx_installer.sh [options]
    If called without arguments, installs stable nginx using /opt/nginx
@@ -22,6 +23,34 @@
    --changelog            |-cl  view changelog for nginx version
    --update               |-upd check for script update
    --uninstall            |-u   uninstall nginx
+ ```
+
+- Options / modules can be overridden, just like [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall) 
+- (This is the same option as extra modules option.)
+
+ ```bash
+ HEADLESS=y \
+ PAGESPEED=n \
+ BROTLI=n \
+ HEADERMOD=y \
+ GEOIP=y \
+ GEOIP2_ACCOUNT_ID= \
+ GEOIP2_LICENSE_KEY= \
+ FANCYINDEX=y \
+ CACHEPURGE=y \
+ SUBFILTER=y \
+ LUA=n \
+ WEBDAV=y \
+ VTS=y \
+ RTMP=y \
+ TESTCOOKIE=y \
+ REDIS2=y \
+ HTTPREDIS=n \
+ SRCACHE=y \
+ SETMISC=y \
+ NGXECHO=y \
+ ZSTF=y \
+ ./nginx_installer.sh
  ```
  
  ### Installation
