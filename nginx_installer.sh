@@ -561,7 +561,7 @@ if [[ $DISTRO_GROUP == "Debian" ]]; then
   INSTALL="apt-get -o Dpkg::Progress-Fancy="1" install -qq"
   PKGCHK="dpkg -s"
   # Install packages
-  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre3 libpcre3-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake"
+  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre3 libpcre3-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev"
 else
   echo -e "${RED}${BALLOT_X} Error: Sorry, your OS is not supported.${NORMAL}"
   exit 1;
@@ -1213,10 +1213,17 @@ install_nginx() {
 		fi
 
 		if [[ $GEOIP == 'y' ]]; then
-			if grep -q "main contrib" /etc/apt/sources.list; then
+			if grep -q "# See /etc/apt/sources.list.d/debian.sources" /etc/apt/sources.list
+			then
+				sources_list=/etc/apt/sources.list.d/debian.sources
+			else
+				sources_list=/etc/apt/sources.list
+			fi
+			if grep -q "main contrib" $sources_list
+			then
 				echo "main contrib already in sources.list... Skipping"
 			else
-				sed -i "s/main/main contrib/g" /etc/apt/sources.list
+				sed -i "s/main/main contrib/g" $sources_list
 			fi
 			apt-get update
 			apt-get install -y geoipupdate
