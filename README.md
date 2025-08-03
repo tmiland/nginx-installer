@@ -34,12 +34,12 @@
  BROTLI=n \
  HEADERMOD=y \
  GEOIP=y \
- GEOIP2_ACCOUNT_ID= \
- GEOIP2_LICENSE_KEY= \
+ GEOIP2_ACCOUNT_ID=<YOUR GEOIP2_ACCOUNT_ID> \
+ GEOIP2_LICENSE_KEY=<YOUR GEOIP2_LICENSE_KEY> \
  FANCYINDEX=y \
  CACHEPURGE=y \
  SUBFILTER=y \
- LUA=n \
+ LUA=y \
  WEBDAV=y \
  VTS=y \
  RTMP=y \
@@ -50,7 +50,8 @@
  SETMISC=y \
  NGXECHO=y \
  ZSTF=y \
- ./nginx_installer.sh
+ BADBOT=y \
+ ./nginx_installer.sh 2>&1 | tee nginx-installer.log
  ```
  
  ### Installation
