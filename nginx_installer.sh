@@ -561,7 +561,7 @@ if [[ $DISTRO_GROUP == "Debian" ]]; then
   INSTALL="apt-get -o Dpkg::Progress-Fancy="1" install -qq"
   PKGCHK="dpkg -s"
   # Install packages
-  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre3 libpcre3-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev"
+  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2 libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev"
 else
   echo -e "${RED}${BALLOT_X} Error: Sorry, your OS is not supported.${NORMAL}"
   exit 1;
