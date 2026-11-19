@@ -1,0 +1,21 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: tests/test_installer.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n nginx_installer.sh tests/test_installer.sh
+      - name: Run unit tests
+        run: bash tests/test_installer.sh

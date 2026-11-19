@@ -14,6 +14,7 @@
    --nginx                |-ng  nginx version (X.Y.Z)
    --stable               |-s   stable nginx version (auto-detected)
    --mainline             |-m   mainline nginx version (auto-detected)
+   --detect               |-dt  detect the distro and exit
    --headless             |-hl  headless install
    --modules-extra        |-me  extra modules
    --bad-bot              |-bb  install the bad bot blocker
@@ -100,6 +101,8 @@ To install this script:
   ## Compatibility and Requirements
 
   - Debian 9 and later
+
+  CI builds and uninstalls nginx on Debian 12/13 and Ubuntu 22.04/24.04; Mint 21.3 and LMDE 7 are checked for distro detection.
 
 #### Compile options With headless
 
