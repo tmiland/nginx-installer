@@ -11,12 +11,13 @@
    If called without arguments, installs stable nginx using /opt/nginx
 
    --help                 |-h   display this help and exit
-   --nginx                |-ng  nginx version of choice
-   --stable               |-s   stable nginx version 1.28.0
-   --mainline             |-m   mainline nginx version 1.29.0
-   --headless             |-h   headless install
+   --nginx                |-ng  nginx version (X.Y.Z)
+   --stable               |-s   stable nginx version (auto-detected)
+   --mainline             |-m   mainline nginx version (auto-detected)
+   --headless             |-hl  headless install
    --modules-extra        |-me  extra modules
-   --dir                  |-d   install directory
+   --bad-bot              |-bb  install the bad bot blocker
+   --dir                  |-d   temporary build directory
    --verbose              |-v   increase verbosity
    --nproc                |-n   set the number of processing units to use
    --enable-debug-info    |-edi enable debug info
