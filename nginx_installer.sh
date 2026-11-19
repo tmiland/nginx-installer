@@ -11,7 +11,7 @@
 ######################################################################
 
 
-VERSION='1.0.1'
+VERSION='1.0.2'
 
 #------------------------------------------------------------------------------#
 #
@@ -1283,7 +1283,7 @@ install_nginx() {
       log_debug "Phase 4 of 5: Configuration"
       printf "%s \\n" "${GREEN}▣▣▣${YELLOW}▣${CYAN}□□${NORMAL} Phase ${YELLOW}4${NORMAL} of ${GREEN}6${NORMAL}: Setup nginx"
       log_debug "Configuring..."
-			sed -i "435i\        ngx_write_stderr(\"built with Nginx Installer @tmiland\" NGX_LINEFEED);" src/core/nginx.c
+			sed -i '/ngx_write_stderr("built by " NGX_COMPILER NGX_LINEFEED);/i\        ngx_write_stderr("built with Nginx Installer @tmiland" NGX_LINEFEED);' src/core/nginx.c
 			if [[ $LUA == 'y' ]]; then
 				export LUAJIT_LIB=/usr/local/lib
 				export LUAJIT_INC=/usr/local/include/luajit-2.1
