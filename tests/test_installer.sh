@@ -102,6 +102,7 @@ assert_function validate_build_dir
 assert_function prepare_build_dir
 assert_function validate_install_dir
 assert_function nginx_source_version
+assert_function detect_distro
 
 # ---------------------------------------------------------------------------
 # Version detection and git ref selection.
@@ -149,6 +150,7 @@ assert_eq "stable-1.30" "$(source_ref)" "the default resolves the stable branch"
 assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selects the mainline channel"
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
 assert_eq "release-1.30.7" "$(source_ref --nginx 1.30.7)" "--nginx resolves its release tag"
+assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
 
 if ( source ./nginx_installer.sh --nginx 1.30 >/dev/null 2>&1 ); then
   fail "rejects a two-part --nginx version"
@@ -169,6 +171,68 @@ fi
 usage_out=$(usage)
 assert_contains "$usage_out" "|-hl" "usage documents -hl for headless"
 assert_contains "$usage_out" "--bad-bot" "usage documents --bad-bot"
+assert_contains "$usage_out" "--detect" "usage documents --detect"
+
+# ---------------------------------------------------------------------------
+# Distro detection (fixtures, so no container is needed).
+# ---------------------------------------------------------------------------
+make_distro_fixture() {
+  local dir=$1 issue=$2
+  mkdir -p "$dir/etc"
+  : > "$dir/etc/debian_version"
+  printf '%s\n' "$issue" > "$dir/etc/issue.net"
+}
+
+mint="$WORK/distro-mint"
+make_distro_fixture "$mint" 'Linux Mint 21.3 Virginia'
+assert_eq "Debian" "$( (detect_distro "$mint"; printf '%s' "$DISTRO_GROUP") )" "detects Linux Mint"
+assert_eq "Linux Mint 21.3 Virginia" "$( (detect_distro "$mint"; printf '%s' "$DISTRO") )" "reads the Mint issue string"
+
+lmde="$WORK/distro-lmde"
+make_distro_fixture "$lmde" 'LMDE 7 Gigi'
+assert_eq "Debian" "$( (detect_distro "$lmde"; printf '%s' "$DISTRO_GROUP") )" "detects LMDE"
+
+debian="$WORK/distro-debian"
+make_distro_fixture "$debian" 'Debian GNU/Linux 13 (trixie)'
+assert_eq "Debian" "$( (detect_distro "$debian"; printf '%s' "$DISTRO_GROUP") )" "detects Debian"
+
+ubuntu="$WORK/distro-ubuntu"
+make_distro_fixture "$ubuntu" 'Ubuntu 24.04.3 LTS'
+assert_eq "Debian" "$( (detect_distro "$ubuntu"; printf '%s' "$DISTRO_GROUP") )" "detects Ubuntu"
+
+fedora="$WORK/distro-fedora"
+mkdir -p "$fedora/etc"
+printf '%s\n' 'Fedora Linux 44 (Forty Four)' > "$fedora/etc/redhat-release"
+assert_not_ok "rejects an unsupported distro" detect_distro "$fedora"
+
+unknown="$WORK/distro-unknown"
+mkdir -p "$unknown/etc"
+assert_not_ok "rejects an unknown distro" detect_distro "$unknown"
+
+# os-release is the reliable source when /etc/issue.net is empty.
+mint_os="$WORK/distro-mint-osrelease"
+mkdir -p "$mint_os/etc"
+: > "$mint_os/etc/debian_version"
+: > "$mint_os/etc/issue.net"
+cat > "$mint_os/etc/os-release" <<'EOF'
+ID=linuxmint
+ID_LIKE="ubuntu debian"
+PRETTY_NAME="Linux Mint 21.3"
+EOF
+assert_eq "Debian" "$( (detect_distro "$mint_os"; printf '%s' "$DISTRO_GROUP") )" "detects Mint from os-release when issue.net is empty"
+
+lmde_os="$WORK/distro-lmde-osrelease"
+mkdir -p "$lmde_os/etc"
+: > "$lmde_os/etc/debian_version"
+: > "$lmde_os/etc/issue.net"
+cat > "$lmde_os/etc/os-release" <<'EOF'
+ID=lmde
+ID_LIKE="debian"
+PRETTY_NAME="LMDE 7"
+EOF
+assert_eq "Debian" "$( (detect_distro "$lmde_os"; printf '%s' "$DISTRO_GROUP") )" "detects LMDE from os-release when issue.net is empty"
+
+
 
 # ---------------------------------------------------------------------------
 # Build directory safety.

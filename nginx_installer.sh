@@ -47,6 +47,8 @@ VERSION='1.0.2'
 CURRDIR=$(pwd)
 # Set update check
 UPDATE_SCRIPT=0
+# Detect the distribution and exit
+DETECT_ONLY=0
 # Get script filename
 self=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_FILENAME=$(basename "$self")
@@ -148,6 +150,80 @@ validate_install_dir() {
       ;;
   esac
   return 1
+}
+# Detect the distribution family. The optional argument is a filesystem root
+# for tests; production calls it with no argument.
+# shellcheck disable=SC2120
+detect_distro() {
+  local root=${1:-} os_id="" os_like=""
+  DISTRO=""
+  DISTRO_GROUP=""
+  PKGCMD=""
+  LSB=""
+
+  if [[ -f $root/etc/os-release ]]; then
+    os_id=$(sed -n 's/^ID=//p' "$root/etc/os-release" | tr -d '"')
+    os_like=$(sed -n 's/^ID_LIKE=//p' "$root/etc/os-release" | tr -d '"')
+  fi
+
+  if [[ -f $root/etc/debian_version ]]; then
+    if [[ -s $root/etc/issue.net ]]; then
+      DISTRO=$(cat "$root/etc/issue.net")
+    elif [[ -f $root/etc/os-release ]]; then
+      DISTRO=$(sed -n 's/^PRETTY_NAME=//p' "$root/etc/os-release" | tr -d '"')
+    fi
+    [[ -n $DISTRO ]] || DISTRO=Debian
+  elif [[ -f $root/etc/redhat-release ]]; then
+    DISTRO=$(cat "$root/etc/redhat-release")
+  elif [[ -f $root/etc/os-release ]]; then
+    DISTRO=$(sed -n 's/^PRETTY_NAME=//p' "$root/etc/os-release" | tr -d '"')
+  fi
+
+  shopt -s nocasematch
+  # ID and ID_LIKE are the reliable source; /etc/issue.net is only a fallback.
+  local ids=" ${os_id,,} ${os_like,,} "
+  case "$ids" in
+    *" debian "*|*" ubuntu "*)
+      PKGCMD='apt-get -o Dpkg::Progress-Fancy=1 install -qq'
+      LSB=lsb-release
+      DISTRO_GROUP=Debian
+      return 0
+      ;;
+  esac
+
+  case "$DISTRO" in
+    Debian*|Ubuntu*|Linux\ Mint*|LinuxMint*|LMDE*|PureOS*|Pop*|Devuan*)
+      PKGCMD='apt-get -o Dpkg::Progress-Fancy=1 install -qq'
+      LSB=lsb-release
+      DISTRO_GROUP=Debian
+      ;;
+    CentOS*)
+      PKGCMD='yum install -y'
+      LSB=redhat-lsb
+      DISTRO_GROUP=RHEL
+      echo -e "${RED}${BALLOT_X} distro not yet supported: '$DISTRO'${NORMAL}"
+      return 1
+      ;;
+    Fedora*)
+      PKGCMD='dnf install -y'
+      LSB=redhat-lsb
+      DISTRO_GROUP=RHEL
+      echo -e "${RED}${BALLOT_X} distro not yet supported: '$DISTRO'${NORMAL}"
+      return 1
+      ;;
+    Arch*|Manjaro*)
+      PKGCMD='yes | LC_ALL=en_US.UTF-8 pacman -S'
+      LSB=lsb-release
+      DISTRO_GROUP=Arch
+      echo -e "${RED}${BALLOT_X} distro not yet supported: '$DISTRO'${NORMAL}"
+      return 1
+      ;;
+    *)
+      echo -e "${RED}${BALLOT_X} unknown distro: '${DISTRO:-unknown}'${NORMAL}"
+      return 1
+      ;;
+  esac
+  return 0
 }
 # Default Kernel version
 STABLE_VER=$(latest_nginx Stable)
@@ -436,6 +512,7 @@ usage() {
   printf "%s\\n" "  ${YELLOW}--nginx                |-ng${NORMAL}  nginx version (X.Y.Z)"
   printf "%s\\n" "  ${YELLOW}--stable               |-s${NORMAL}   stable nginx version ${YELLOW}$STABLE_VER${NORMAL}"
   printf "%s\\n" "  ${YELLOW}--mainline             |-m${NORMAL}   mainline nginx version ${YELLOW}$MAINLINE_VER${NORMAL}"
+  printf "%s\\n" "  ${YELLOW}--detect               |-dt${NORMAL}  detect the distro and exit"
 	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  extra modules"
 	printf "%s\\n" "  ${YELLOW}--bad-bot              |-bb${NORMAL}  install the bad bot blocker"
@@ -458,6 +535,10 @@ while [[ $# -gt 0 ]]; do
     --help | -h)
       usage
       exit 0
+      ;;
+    --detect | -dt)
+      DETECT_ONLY=1
+      shift
       ;;
     --verbose | -v)
       shift
@@ -543,6 +624,13 @@ if [[ ${NGINX_INSTALLER_LIB_ONLY:-0} == 1 ]]; then
   return 0 2>/dev/null || exit 0
 fi
 
+# Read-only distro check; must work without root.
+if [[ $DETECT_ONLY == 1 ]]; then
+  detect_distro || exit 1
+  printf 'DISTRO=%s\nDISTRO_GROUP=%s\n' "$DISTRO" "$DISTRO_GROUP"
+  exit 0
+fi
+
 # Everything below this point changes the system.
 chk_permissions
 
@@ -592,42 +680,7 @@ if [[ -f $LOGFILE ]]; then
   rm "$LOGFILE"
 fi
 
-shopt -s nocasematch
-if [[ -f /etc/debian_version ]]; then
-  DISTRO=$(cat /etc/issue.net)
-elif [[ -f /etc/redhat-release ]]; then
-  DISTRO=$(cat /etc/redhat-release)
-elif [[ -f /etc/os-release ]]; then
-  DISTRO=$(cat < /etc/os-release | grep "PRETTY_NAME" | sed 's/PRETTY_NAME=//g' | sed 's/["]//g' | awk '{print $1}')
-fi
-
-case "$DISTRO" in
-  Debian*|Ubuntu*|LinuxMint*|PureOS*|Pop*|Devuan*)
-    # shellcheck disable=SC2140
-    PKGCMD="apt-get -o Dpkg::Progress-Fancy="1" install -qq"
-    LSB=lsb-release
-    DISTRO_GROUP=Debian
-    ;;
-  CentOS*)
-    PKGCMD="yum install -y"
-    LSB=redhat-lsb
-    DISTRO_GROUP=RHEL
-    echo -e "${RED}${BALLOT_X} distro not yet supported: '$DISTRO'${NORMAL}" ; exit 1
-    ;;
-  Fedora*)
-    PKGCMD="dnf install -y"
-    LSB=redhat-lsb
-    DISTRO_GROUP=RHEL
-    echo -e "${RED}${BALLOT_X} distro not yet supported: '$DISTRO'${NORMAL}" ; exit 1
-    ;;
-  Arch*|Manjaro*)
-    PKGCMD="yes | LC_ALL=en_US.UTF-8 pacman -S"
-    LSB=lsb-release
-    DISTRO_GROUP=Arch
-    echo -e "${RED}${BALLOT_X} distro not yet supported: '$DISTRO'${NORMAL}" ; exit 1
-    ;;
-  *) echo -e "${RED}${BALLOT_X} unknown distro: '$DISTRO'${NORMAL}" ; exit 1 ;;
-esac
+detect_distro || exit 1
 if ! lsb_release -si 1>/dev/null 2>&1; then
   echo ""
   echo -e "${RED}${BALLOT_X} Looks like ${LSB} is not installed!${NORMAL}"

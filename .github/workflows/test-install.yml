@@ -1,0 +1,243 @@
+name: Test nginx install
+
+on:
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: Pinned nginx version to build
+        required: false
+        default: "1.30.7"
+  schedule:
+    # Weekly, off the hour: nginx.org's stable release moves on its own, so a
+    # new release that breaks the default install must show up without a PR.
+    - cron: '37 3 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - nginx_installer.sh
+      - src/slib.sh
+      - tests/**
+      - .github/workflows/test-install.yml
+  pull_request:
+    paths:
+      - nginx_installer.sh
+      - src/slib.sh
+      - tests/**
+      - .github/workflows/test-install.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-install-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: Detect ${{ matrix.name }}
+    # Mint/LMDE are supported by the installer but are not part of the install
+    # matrix, so verify their /etc/issue.net strings are recognized.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux Mint 21.3
+            image: linuxmintd/mint21.3-amd64
+          - name: LMDE 7
+            image: linuxmintd/lmde7-amd64
+          - name: Debian 13 (trixie)
+            image: debian:13
+          - name: Ubuntu 24.04 (noble)
+            image: ubuntu:24.04
+    container:
+      image: ${{ matrix.image }}
+    env:
+      TERM: xterm
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl git ncurses-bin
+      - uses: actions/checkout@v4
+      - name: Detect the distribution
+        run: |
+          set -eux
+          out=$(./nginx_installer.sh --detect)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -qx 'DISTRO_GROUP=Debian'
+          echo "OK: $(printf '%s\n' "$out" | sed -n 's/^DISTRO=//p') detected as Debian family"
+
+  install:
+    name: ${{ matrix.name }}
+    # Pinned to one version so PR checks stay reproducible; the weekly run
+    # uses latest-install instead.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian 12 (bookworm)
+            image: debian:12
+            slug: debian-12
+          - name: Debian 13 (trixie)
+            image: debian:13
+            slug: debian-13
+          - name: Ubuntu 22.04 (jammy)
+            image: ubuntu:22.04
+            slug: ubuntu-22.04
+          - name: Ubuntu 24.04 (noble)
+            image: ubuntu:24.04
+            slug: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    env:
+      TERM: xterm
+      HEADLESS: "y"
+      NGINX_VERSION: ${{ github.event.inputs.nginx_version || '1.30.7' }}
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl git lsb-release procps ncurses-bin
+      - uses: actions/checkout@v4
+      - name: Stub systemd for the container
+        run: |
+          cat > /usr/local/bin/systemctl <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod +x /usr/local/bin/systemctl
+          command -v systemctl
+      - name: Build and install nginx ${{ env.NGINX_VERSION }}
+        run: ./nginx_installer.sh --nginx "${NGINX_VERSION}"
+      - name: Show installer log on failure
+        if: failure()
+        run: |
+          echo "=== nginx_installer.log (last 200 lines) ==="
+          tail -n 200 nginx_installer.log || true
+      - name: Verify installation
+        run: |
+          set -eux
+          test -x /usr/sbin/nginx
+          installed=$(/usr/sbin/nginx -V 2>&1 | sed -n 's/^nginx version: nginx\///p')
+          test "$installed" = "${NGINX_VERSION}"
+          /usr/sbin/nginx -V 2>&1 | grep -q 'built with Nginx Installer @tmiland'
+          /usr/sbin/nginx -t
+          test "$(cat /etc/nginx/installed_version)" = "${NGINX_VERSION}"
+          grep -q "Downloading nginx release-${NGINX_VERSION}" nginx_installer.log
+          echo "nginx ${installed} installed and verified on $(. /etc/os-release && echo "$PRETTY_NAME")"
+      - name: Uninstall and verify cleanup
+        env:
+          RM_CONF: "y"
+          RM_LOGS: "y"
+        run: |
+          set -eux
+          ./nginx_installer.sh --uninstall
+          test ! -e /usr/sbin/nginx
+          test ! -d /etc/nginx
+          test ! -d /var/log/nginx
+          test ! -d /var/cache/nginx
+          test ! -e /etc/systemd/system/nginx.service
+          test ! -e /etc/logrotate.d/nginx
+          if apt-mark showhold | grep -qx nginx; then
+            echo "FAIL: nginx is still on apt hold"
+            exit 1
+          fi
+          echo "nginx uninstalled and cleaned up"
+      - name: Upload installer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-installer-log-${{ matrix.slug }}
+          path: nginx_installer.log
+          if-no-files-found: ignore
+
+  latest-install:
+    name: Latest stable ${{ matrix.name }}
+    # Weekly and manual only: follows nginx.org's current stable release, so it
+    # is not a reproducible PR check. Runs the default no-argument path.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian 13 (trixie)
+            image: debian:13
+            slug: debian-13
+          - name: Ubuntu 24.04 (noble)
+            image: ubuntu:24.04
+            slug: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    env:
+      TERM: xterm
+      HEADLESS: "y"
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl git lsb-release procps ncurses-bin
+      - uses: actions/checkout@v4
+      - name: Stub systemd for the container
+        run: |
+          cat > /usr/local/bin/systemctl <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod +x /usr/local/bin/systemctl
+          command -v systemctl
+      - name: Build and install the current stable nginx
+        run: ./nginx_installer.sh
+      - name: Show installer log on failure
+        if: failure()
+        run: |
+          echo "=== nginx_installer.log (last 200 lines) ==="
+          tail -n 200 nginx_installer.log || true
+      - name: Verify the stable branch was built
+        run: |
+          set -eux
+          test -x /usr/sbin/nginx
+          installed=$(/usr/sbin/nginx -V 2>&1 | sed -n 's/^nginx version: nginx\///p')
+          test -n "$installed"
+          branch=$(sed -n 's/.*Downloading nginx \(stable-[0-9][0-9.]*\)\.\.\..*/\1/p' nginx_installer.log | head -n 1)
+          test -n "$branch"
+          case "$installed" in
+            "${branch#stable-}"*) ;;
+            *) echo "FAIL: installed $installed is not on $branch"; exit 1 ;;
+          esac
+          /usr/sbin/nginx -V 2>&1 | grep -q 'built with Nginx Installer @tmiland'
+          /usr/sbin/nginx -t
+          test "$(cat /etc/nginx/installed_version)" = "$installed"
+          echo "nginx ${installed} built from $branch on $(. /etc/os-release && echo "$PRETTY_NAME")"
+      - name: Uninstall and verify cleanup
+        env:
+          RM_CONF: "y"
+          RM_LOGS: "y"
+        run: |
+          set -eux
+          ./nginx_installer.sh --uninstall
+          test ! -e /usr/sbin/nginx
+          test ! -d /etc/nginx
+          test ! -d /var/log/nginx
+          test ! -d /var/cache/nginx
+          test ! -e /etc/systemd/system/nginx.service
+          test ! -e /etc/logrotate.d/nginx
+          if apt-mark showhold | grep -qx nginx; then
+            echo "FAIL: nginx is still on apt hold"
+            exit 1
+          fi
+          echo "nginx uninstalled and cleaned up"
+      - name: Upload installer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-installer-log-latest-${{ matrix.slug }}
+          path: nginx_installer.log
+          if-no-files-found: ignore
