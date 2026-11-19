@@ -51,7 +51,7 @@ UPDATE_SCRIPT=0
 self=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_FILENAME=$(basename "$self")
 # Logfile
-LOGFILE=$CURRDIR/nginx_installer.log
+LOGFILE=${LOGFILE:-$CURRDIR/nginx_installer.log}
 # Default processing units (all available)
 NPROC=$(nproc)
 # Console output level; ignore debug level messages.
@@ -71,6 +71,84 @@ latest_nginx() {
 	grep -oP "(?<="$1" version).*?(?=[0-9]+\.[0-9]+\.[0-9](-[0-9])?</a)" |
 	grep -oP "[0-9]+\.[0-9]+\.[0-9](-[0-9])?"
 }
+# True when the argument looks like an nginx release version (X.Y.Z).
+is_nginx_version() {
+  [[ ${1:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+# Map a release version to its stable branch (1.30.7 -> stable-1.30).
+nginx_stable_ref() {
+  is_nginx_version "${1:-}" || return 1
+  printf 'stable-%s\n' "${1%.*}"
+}
+# Pick the git ref to build for the selected channel.
+nginx_git_ref() {
+  local name=${NGINX_VER_NAME:-stable}
+  name=${name,,}
+  case "$name" in
+    stable)
+      nginx_stable_ref "${NGINX_VER:-}"
+      ;;
+    mainline)
+      printf 'master\n'
+      ;;
+    custom)
+      is_nginx_version "${NGINX_VER:-}" || return 1
+      printf 'release-%s\n' "$NGINX_VER"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+# Read NGINX_VERSION from a source-tree nginx.h by name, not by line number.
+nginx_source_version() {
+  local header=${1:-}
+  [[ -f $header ]] || return 1
+  awk -F'"' '/^#define[[:space:]]+NGINX_VERSION[[:space:]]/ { print $2; exit }' "$header"
+}
+# Refuse build directories that could destroy the system when wiped.
+validate_build_dir() {
+  local dir=${1:-} canonical
+  [[ -n $dir && $dir == /* ]] || return 1
+  canonical=$(realpath -m -- "$dir" 2>/dev/null) || return 1
+  [[ $canonical == "$dir" ]] || return 1
+  case "$dir" in
+    /opt/*|/usr/local/*|/var/tmp/*|/tmp/*|/home/*|/root/*|/srv/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+# Prepare the build directory. Returns 2 when the directory exists, is
+# non-empty, and was not created by this installer.
+prepare_build_dir() {
+  local dir=${1:-}
+  validate_build_dir "$dir" || return 1
+  [[ -L $dir ]] && return 1
+  [[ -e $dir && ! -d $dir ]] && return 1
+  if [[ -d $dir ]]; then
+    if [[ ! -f $dir/.nginx-installer ]] &&
+       [[ -n $(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) ]]; then
+      return 2
+    fi
+    rm -rf -- "$dir" || return 1
+  fi
+  mkdir -p -- "$dir" || return 1
+  : > "$dir/.nginx-installer" || return 1
+}
+# Refuse install directories that must never be deleted on uninstall.
+validate_install_dir() {
+  local dir=${1:-} canonical
+  [[ -n $dir && $dir == /* ]] || return 1
+  canonical=$(realpath -m -- "$dir" 2>/dev/null) || return 1
+  [[ $canonical == "$dir" ]] || return 1
+  case "$dir" in
+    /etc/*|/usr/local/*|/opt/*|/srv/*|/home/*|/root/*|/var/tmp/*|/tmp/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
 # Default Kernel version
 STABLE_VER=$(latest_nginx Stable)
 # Mainline kernel version
@@ -79,6 +157,7 @@ MAINLINE_VER=$(latest_nginx Mainline)
 NGINX_VER=${NGINX_VER:-$STABLE_VER}
 # Default nginx version name
 NGINX_VER_NAME=${NGINX_VER_NAME:-stable}
+NGINX_VER_NAME=${NGINX_VER_NAME,,}
 # Installed kernel
 CURRENT_VER=$INSTALL_DIR/installed_version
 # Repo name for this script
@@ -155,9 +234,8 @@ fatal() {
   echo
   log_fatal "Fatal Error Occurred: $1"
   printf "%s \\n" "${RED}Cannot continue installation.${NORMAL}"
-  if [ -x "$TEMP_INSTALL_DIR" ]; then
-    log_warning "Removing temporary directory and files."
-    rm -rf "$TEMP_INSTALL_DIR"
+  if [ -d "$TEMP_INSTALL_DIR" ]; then
+    log_warning "Build directory retained for troubleshooting: $TEMP_INSTALL_DIR"
   fi
   log_fatal "If you are unsure of what went wrong, you may wish to review the log"
   log_fatal "in $LOGFILE"
@@ -355,12 +433,13 @@ usage() {
   echo "  If called without arguments, installs stable nginx ${YELLOW}${NGINX_VER}${NORMAL} using ${TEMP_INSTALL_DIR}"
   echo
   printf "%s\\n" "  ${YELLOW}--help                 |-h${NORMAL}   display this help and exit"
-  printf "%s\\n" "  ${YELLOW}--nginx                |-ng${NORMAL}  nginx version of choice"
+  printf "%s\\n" "  ${YELLOW}--nginx                |-ng${NORMAL}  nginx version (X.Y.Z)"
   printf "%s\\n" "  ${YELLOW}--stable               |-s${NORMAL}   stable nginx version ${YELLOW}$STABLE_VER${NORMAL}"
   printf "%s\\n" "  ${YELLOW}--mainline             |-m${NORMAL}   mainline nginx version ${YELLOW}$MAINLINE_VER${NORMAL}"
-	printf "%s\\n" "  ${YELLOW}--headless             |-h${NORMAL}   headless install"
+	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  extra modules"
-  printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   install directory"
+	printf "%s\\n" "  ${YELLOW}--bad-bot              |-bb${NORMAL}  install the bad bot blocker"
+  printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory (under /opt, /usr/local, /var/tmp, /tmp, /home, /root, or /srv)"
   printf "%s\\n" "  ${YELLOW}--verbose              |-v${NORMAL}   increase verbosity"
   printf "%s\\n" "  ${YELLOW}--nproc                |-n${NORMAL}   set the number of processing units to use"
   printf "%s\\n" "  ${YELLOW}--enable-debug-info    |-edi${NORMAL} enable debug info"
@@ -387,18 +466,21 @@ while [[ $# -gt 0 ]]; do
     --stable | -s)
       shift
       NGINX_VER=$STABLE_VER
-      NGINX_VER_NAME=Stable
+      NGINX_VER_NAME=stable
       ;;
     --mainline | -m)
       shift
       NGINX_VER=$MAINLINE_VER
-      NGINX_VER_NAME=Mainline
+      NGINX_VER_NAME=mainline
       ;;
     --nginx | -ng)
+      if [[ -z ${2:-} || $2 == -* ]]; then
+        fatal "Option --nginx requires a version (X.Y.Z)."
+      fi
       NGINX_VER="$2"
-      NGINX_VER_NAME=Custom
-      shift
-      shift
+      is_nginx_version "$NGINX_VER" || fatal "Invalid nginx version: '$NGINX_VER' (expected X.Y.Z)."
+      NGINX_VER_NAME=custom
+      shift 2
       ;;
 		--headless | -hl)
 			shift
@@ -413,14 +495,20 @@ while [[ $# -gt 0 ]]; do
 			BADBOT=y
 			;;
     --dir | -d) # Bash Space-Separated (e.g., --option argument)
+      if [[ -z ${2:-} || $2 == -* ]]; then
+        fatal "Option --dir requires a path."
+      fi
+      validate_build_dir "$2" ||
+        fatal "Refusing unsafe build directory: '$2'. Use a path under /opt, /usr/local, /var/tmp, /tmp, /home, /root, or /srv."
       TEMP_INSTALL_DIR="$2" # Source: https://stackoverflow.com/a/14203146
-      shift # past argument
-      shift # past value
+      shift 2
       ;;
     --nproc | -n)
+      if [[ ! ${2:-} =~ ^[1-9][0-9]*$ ]]; then
+        fatal "Option --nproc requires a positive integer."
+      fi
       NPROC=$2
-      shift
-      shift
+      shift 2
       ;;
     --changelog | -cl)
       changelog
@@ -449,44 +537,53 @@ done
 
 set -- "${POSITIONAL_ARGS[@]}" # restore positional parameters
 
+# Allow the test suite to source the helpers and option parser without
+# running an install.
+if [[ ${NGINX_INSTALLER_LIB_ONLY:-0} == 1 ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+# Everything below this point changes the system.
+chk_permissions
+
 # Uninstall nginx
 if [ "$mode" = "uninstall" ]
 then
-	if [ -d $INSTALL_DIR ]
+	if [ -d "$INSTALL_DIR" ] || [ -x /usr/sbin/nginx ]
 	then
-	systemctl stop nginx && systemctl disable nginx
-	systemctl daemon-reload
-	rm -rf /etc/systemd/system/nginx.service
-	rm -rf /etc/logrotate.d/nginx
+	systemctl stop nginx || true
+	systemctl disable nginx || true
+	systemctl daemon-reload || true
+	rm -f /etc/systemd/system/nginx.service
+	rm -f /etc/logrotate.d/nginx
   if [[ $RM_CONF == 'y' ]]; then
-		! test -d '$INSTALL_DIR' || rm -rf '$INSTALL_DIR'
+		validate_install_dir "$INSTALL_DIR" ||
+		  fatal "Refusing to delete unsafe install directory: '$INSTALL_DIR'."
+		rm -rf -- "$INSTALL_DIR"
 	fi
-	  ! test -f '/usr/sbin/nginx' \
-	          || rm -rf '/usr/sbin/nginx'
+	rm -f /usr/sbin/nginx
 	if [[ $RM_LOGS == 'y' ]]; then
-	  ! test -d '/var/log/nginx' \
-	          || rm -rf '/var/log/nginx'
+	  rm -rf -- /var/log/nginx
 	fi
-  ! test -d '/var/cache/nginx' \
-          || rm -rf '/var/cache/nginx'
-  ! test -f '/var/run/nginx.pid' \
-          || rm -rf '/var/run/nginx.pid'
-  ! test -f '/var/run/nginx.lock' \
-          || rm -rf '/var/run/nginx.lock'
-	apt-mark unhold nginx
-	if [ $? -eq 0 ]
-  then
-    echo ""
-    echo -e "${GREEN}${DONE} Success${NORMAL}"
-    echo ""
-	fi
+  rm -rf -- /var/cache/nginx
+  rm -f /var/run/nginx.pid /var/run/nginx.lock
+	apt-mark unhold nginx >/dev/null 2>&1 || true
+  echo ""
+  echo -e "${GREEN}${DONE} Success${NORMAL}"
+  echo ""
 	else
 		echo ""
 	  echo -e "${RED}${BALLOT_X} Looks like nginx is not installed! :(${NORMAL}"
 	  echo ""
 	fi
-  exit
+  exit 0
 fi
+
+# Resolve the requested version and git ref before changing the system.
+is_nginx_version "${NGINX_VER:-}" ||
+  fatal "Could not determine the nginx version (got '${NGINX_VER:-empty}'). Check access to nginx.org or pass --nginx X.Y.Z."
+NGINX_GIT_REF=$(nginx_git_ref) ||
+  fatal "Could not resolve a git ref for ${NGINX_VER_NAME:-stable} nginx ${NGINX_VER}."
 
 chk_nginx
 
@@ -1197,6 +1294,13 @@ install_nginx() {
   echo
   log_info "${CYANBG}Installing Nginx version:${NORMAL} $NGINX_VER_NAME: ${YELLOW}$NGINX_VER${NORMAL}"
   echo
+  prepare_build_dir "$TEMP_INSTALL_DIR"
+  prepare_rc=$?
+  if [[ $prepare_rc -eq 2 ]]; then
+    fatal "Build directory $TEMP_INSTALL_DIR is not empty and was not created by this installer. Remove it manually or choose another --dir."
+  elif [[ $prepare_rc -ne 0 ]]; then
+    fatal "Cannot prepare build directory: $TEMP_INSTALL_DIR"
+  fi
   printf "%s \\n" "${YELLOW}▣${CYAN}□□□□□${NORMAL} Phase ${YELLOW}1${NORMAL} of ${GREEN}6${NORMAL}: Setup packages"
   # Setup Dependencies
   log_debug "Configuring package manager for ${DISTRO_GROUP} .."
@@ -1247,34 +1351,22 @@ install_nginx() {
   read_sleep 1
   echo
   # Download Nginx source code
-  log_debug "Phase 2 of 5: Nginx source code download"
+  log_debug "Phase 2 of 6: Nginx source code download"
   printf "%s \\n" "${GREEN}▣${YELLOW}▣${CYAN}□□□□${NORMAL} Phase ${YELLOW}2${NORMAL} of ${GREEN}6${NORMAL}: Download Nginx source code"
-  if [ ! -d "$TEMP_INSTALL_DIR" ]; then
-    mkdir "$TEMP_INSTALL_DIR" 1>/dev/null 2>&1
-  fi
-  if [ -d "$TEMP_INSTALL_DIR" ]; then
-    log_debug "Deleting old Nginx source code files in $TEMP_INSTALL_DIR"
-    rm -rf "$TEMP_INSTALL_DIR" && mkdir -p "$TEMP_INSTALL_DIR"
-    cd "$TEMP_INSTALL_DIR" || exit 1
-    log_debug "Downloading Nginx source code"
-    run_ok "git clone https://github.com/nginx/nginx.git \"$TEMP_INSTALL_DIR\"/nginx-\"${NGINX_VER}\" >>\"${RUN_LOG}\" 2>&1" "Downloading nginx..."
-    log_success "Download finished"
-		echo
-    cd nginx-"${NGINX_VER}" || exit 0
-    if [ $NGINX_VER_NAME = "stable" ]; then
-			STABLE_VER="${STABLE_VER//.0/}"
-      git checkout "$NGINX_VER_NAME"-"$STABLE_VER" >>"${RUN_LOG}" 2>&1
-    fi
-		log_debug "Phase 3 of 6: Nginx modules download"
-	  printf "%s \\n" "${GREEN}▣▣${YELLOW}▣${CYAN}□□□${NORMAL} Phase ${YELLOW}3${NORMAL} of ${GREEN}6${NORMAL}: Download Nginx modules"
-		if [ ! -d "$TEMP_INSTALL_DIR"/modules ]; then
-		  mkdir -p "$TEMP_INSTALL_DIR"/modules
-		fi
-		log_debug "Downloading Nginx modules"
-		run_ok "download_modules" "Downloading modules..."
-		log_success "Module download finished"
-		
-  fi
+  cd "$TEMP_INSTALL_DIR" || fatal "Could not enter build directory: $TEMP_INSTALL_DIR"
+  log_debug "Downloading Nginx source code (ref: $NGINX_GIT_REF)"
+  clone_cmd=$(printf 'git clone --depth 1 --branch %q https://github.com/nginx/nginx.git %q' \
+    "$NGINX_GIT_REF" "$TEMP_INSTALL_DIR/nginx-$NGINX_VER")
+  run_ok "$clone_cmd" "Downloading nginx $NGINX_GIT_REF..."
+  log_success "Download finished"
+  echo
+  cd "nginx-$NGINX_VER" || fatal "nginx source directory is missing; ref $NGINX_GIT_REF may not exist."
+  log_debug "Phase 3 of 6: Nginx modules download"
+  printf "%s \\n" "${GREEN}▣▣${YELLOW}▣${CYAN}□□□${NORMAL} Phase ${YELLOW}3${NORMAL} of ${GREEN}6${NORMAL}: Download Nginx modules"
+  mkdir -p "$TEMP_INSTALL_DIR/modules" || fatal "Could not create module directory in $TEMP_INSTALL_DIR."
+  log_debug "Downloading Nginx modules"
+  run_ok "download_modules" "Downloading modules..."
+  log_success "Module download finished"
   if [ -d "$TEMP_INSTALL_DIR"/nginx-"${NGINX_VER}" ]; then
     (
       cd "$TEMP_INSTALL_DIR"/nginx-"${NGINX_VER}" || exit 1
@@ -1290,8 +1382,8 @@ install_nginx() {
 			fi
       run_ok "configure" "Running configuration..."
 			# Install default nginx server configuration
-			mkdir -p $INSTALL_DIR
-			tee $INSTALL_DIR/sites-available/default.conf <<EOF >>"${RUN_LOG}" 2>&1
+			mkdir -p "$INSTALL_DIR/sites-available"
+			tee "$INSTALL_DIR/sites-available/default.conf" <<EOF >>"${RUN_LOG}" 2>&1
 server {
   listen 80 default_server;
   listen [::]:80 default_server;
@@ -1381,7 +1473,14 @@ lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";
 EOF
 				# echo -e 'lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";' > $INSTALL_DIR/conf.d/lua_package_path.conf >>"${RUN_LOG}" 2>&1
 			fi
-			sed -n '13 s/[^0-9.]*\([0-9.]*\).*/\1/p' ./src/core/nginx.h > $INSTALL_DIR/installed_version >>"${RUN_LOG}" 2>&1
+			NGINX_BUILT_VER=$(nginx_source_version ./src/core/nginx.h) ||
+			  fatal "Could not read NGINX_VERSION from ./src/core/nginx.h"
+			[[ -n $NGINX_BUILT_VER ]] ||
+			  fatal "Empty NGINX_VERSION in ./src/core/nginx.h"
+			printf '%s\n' "$NGINX_BUILT_VER" > "$INSTALL_DIR/installed_version"
+			if [[ $NGINX_VER_NAME != "mainline" && $NGINX_BUILT_VER != "$NGINX_VER" ]]; then
+			  log_warning "Built nginx $NGINX_BUILT_VER but requested $NGINX_VER (ref $NGINX_GIT_REF)."
+			fi
 			run_ok "nginx -t && systemctl restart nginx" "Restarting nginx..."
 			log_success "done"
 			# Block Nginx from being installed via APT
@@ -1398,16 +1497,19 @@ EOF
       log_success "Installation finished"
       cd - 1>/dev/null 2>&1 || exit 1
     )
+  else
+    fatal "nginx source directory is missing: $TEMP_INSTALL_DIR/nginx-$NGINX_VER"
   fi
 
   echo
   # Cleanup
   printf "%s \\n" "${GREEN}▣▣▣▣▣▣${NORMAL} Cleaning up"
-  if [ "$TEMP_INSTALL_DIR" != "" ] && [ "$TEMP_INSTALL_DIR" != "/" ]; then
+  cd "$CURRDIR" 1>/dev/null 2>&1 || cd /
+  if [[ -f "$TEMP_INSTALL_DIR/.nginx-installer" ]]; then
     log_debug "Cleaning up temporary files in $TEMP_INSTALL_DIR."
-    find "$TEMP_INSTALL_DIR" -delete
+    find "$TEMP_INSTALL_DIR" -delete || log_warning "Could not fully clean up $TEMP_INSTALL_DIR."
   else
-    log_error "Could not safely clean up temporary files because INSTALL DIR set to $TEMP_INSTALL_DIR."
+    log_warning "Not cleaning up $TEMP_INSTALL_DIR: installer marker is missing."
   fi
   # Make sure the cursor is back (if spinners misbehaved)
   tput cnorm
@@ -1415,7 +1517,6 @@ EOF
 }
 
 # Start Script
-chk_permissions
 
 # Install Nginx
 errors=$((0))
@@ -1434,10 +1535,10 @@ else
   log_warning "The following errors occurred during installation:"
   echo
   printf "%s" "${errorlist}"
-  if [ -x "$TEMP_INSTALL_DIR" ]; then
-    log_warning "Removing temporary directory and files."
-    rm -rf "$TEMP_INSTALL_DIR"
+  if [ -d "$TEMP_INSTALL_DIR" ]; then
+    log_warning "Build directory retained for troubleshooting: $TEMP_INSTALL_DIR"
   fi
+  exit 1
 fi
 
-exit
+exit 0
