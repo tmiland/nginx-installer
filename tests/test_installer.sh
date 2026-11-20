@@ -105,12 +105,16 @@ assert_function detect_distro
 assert_function verify_sha256
 assert_function download_verified
 assert_function load_slib
-assert_function clone_pinned
 assert_function fetch_nginx_source
-assert_function modules_selected
+assert_function normalize_module_ids
+assert_function load_modules_manifest
+assert_function resolve_modules
+assert_function module_build_args
+assert_function load_geoip_env_file
+assert_function run_module_handler
+assert_function apply_module_patches
 assert_function modules_bundle_url
 assert_function fetch_modules_bundle
-assert_function load_module_versions
 
 # ---------------------------------------------------------------------------
 # Pinned dependencies and checksum helpers.
@@ -140,11 +144,22 @@ standalone_out=$(
 assert_contains "$standalone_out" "DISTRO_GROUP=Debian" "standalone release path verifies the pinned slib"
 
 # ---------------------------------------------------------------------------
-# Module bundle fetch and version loading (file:// fixture, no network).
+# Module bundle fetch and manifest parsing (file:// fixture, no network).
 # ---------------------------------------------------------------------------
 bundle_root="$WORK/fakebundle"
-mkdir -p "$bundle_root/full/modules/headers-more-nginx-module-0.39"
-printf 'HEADERMOD_VER=0.39\n' > "$bundle_root/full/versions.conf"
+mkdir -p "$bundle_root/full/modules"/{headers-more-nginx-module-0.42,luajit2-2.1-20261117,ngx_devel_kit-0.3.4,lua-nginx-module-0.10.31,ngx_http_geoip2_module-3.4,libmaxminddb-1.14.1,set-misc-nginx-module,zstd-nginx-module,patches}
+cat > "$bundle_root/full/modules.conf" <<'EOF'
+# id|dir|kind|build|requires|env
+headers-more|headers-more-nginx-module-0.42|archive|--add-module={dir}||HEADERMOD
+luajit2|luajit2-2.1-20261117|archive|||LUA
+ngx-devel-kit|ngx_devel_kit-0.3.4|archive|--add-module={dir}||LUA
+lua-nginx|lua-nginx-module-0.10.31|archive|--add-module={dir}|luajit2,ngx-devel-kit|LUA
+geoip2|ngx_http_geoip2_module-3.4|archive|--add-module={dir}|libmaxminddb|GEOIP
+libmaxminddb|libmaxminddb-1.14.1|archive|||GEOIP
+set-misc|set-misc-nginx-module|git|--add-module={dir}|ngx-devel-kit|SETMISC
+zstd|zstd-nginx-module|archive|--add-module={dir}||ZSTD
+tlsdyn|patches/tlsdyn.patch|file|||TLSDYN
+EOF
 tar -czf "$WORK/nginx-modules-full.tar.gz" -C "$bundle_root" full
 ( cd "$WORK" && sha256sum nginx-modules-full.tar.gz > SHA256SUMS )
 
@@ -155,14 +170,106 @@ bundle_result=$(
   export MODULES_BUNDLE_URL="file://$WORK/nginx-modules-full.tar.gz"
   export MODULES_SUMS_URL="file://$WORK/SHA256SUMS"
   fetch_modules_bundle >/dev/null 2>&1 || exit 1
-  load_module_versions || exit 1
-  printf '%s' "$HEADERMOD_VER"
+  load_modules_manifest || exit 1
+  printf '%s' "${MODULE_DIR[headers-more]}"
 )
-assert_eq "0.39" "$bundle_result" "loads module versions from the bundle"
-if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.39" ]]; then
-  pass "extracts the module tree from the bundle"
+assert_eq "headers-more-nginx-module-0.42" "$bundle_result" "parses modules.conf from the bundle"
+if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" && -f "$WORK/bundle-extract/modules.conf" ]]; then
+  pass "extracts the module tree and manifest from the bundle"
 else
-  fail "extracts the module tree from the bundle"
+  fail "extracts the module tree and manifest from the bundle"
+fi
+
+# Load the extracted fixture manifest in a subshell and inspect the result.
+manifest_resolved() {
+  (
+    export TEMP_INSTALL_DIR="$WORK/bundle-extract"
+    load_modules_manifest || exit 1
+    resolve_modules "$@" || exit 1
+    printf '%s' "${RESOLVED_MODULES[*]}"
+  )
+}
+manifest_args() {
+  (
+    export TEMP_INSTALL_DIR="$WORK/bundle-extract"
+    load_modules_manifest || exit 1
+    module_build_args "$1"
+  )
+}
+
+assert_eq "--add-module=$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" \
+  "$(manifest_args headers-more)" \
+  "maps a manifest build template to the extracted module dir"
+assert_eq "luajit2 ngx-devel-kit lua-nginx" \
+  "$(manifest_resolved lua-nginx)" \
+  "resolves requires recursively, dependencies first"
+assert_eq "libmaxminddb geoip2" \
+  "$(manifest_resolved geoip2)" \
+  "resolves the geoip2 library dependency"
+assert_eq "" \
+  "$(manifest_args libmaxminddb)" \
+  "library modules have no configure arguments"
+if ( manifest_resolved not-a-module ) >/dev/null 2>&1; then
+  fail "rejects an unknown module id"
+else
+  pass "rejects an unknown module id"
+fi
+mkdir -p "$WORK/bad-manifest"
+printf 'Bad Id|dir|archive|--add-module={dir}||\n' > "$WORK/bad-manifest/modules.conf"
+if ( export TEMP_INSTALL_DIR="$WORK/bad-manifest"; load_modules_manifest ) >/dev/null 2>&1; then
+  fail "rejects an invalid modules.conf id"
+else
+  pass "rejects an invalid modules.conf id"
+fi
+
+# The whole selection path: fetch, parse, resolve requires, append build args.
+selected_args=$(
+  export TEMP_INSTALL_DIR="$WORK/download-run"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export PATH=${PATH#"$WORK/bin:"}
+  export MODULES_BUNDLE_URL="file://$WORK/nginx-modules-full.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/SHA256SUMS"
+  export MODULES=set-misc
+  # shellcheck source=/dev/null
+  source ./nginx_installer.sh >/dev/null 2>&1
+  download_modules >/dev/null 2>&1 || exit 1
+  printf '%s' "$NGINX_MODULES"
+)
+assert_contains "$selected_args" "--add-module=$WORK/download-run/modules/set-misc-nginx-module" "download_modules appends manifest build args"
+assert_contains "$selected_args" "--add-module=$WORK/download-run/modules/ngx_devel_kit-0.3.4" "download_modules appends required module args"
+
+# No MODULES means no bundle download and no third-party modules.
+if (
+  export MODULES=
+  export TEMP_INSTALL_DIR="$WORK/no-module-run"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export PATH=${PATH#"$WORK/bin:"}
+  export MODULES_BUNDLE_URL="file://$WORK/missing.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/missing.sums"
+  # shellcheck source=/dev/null
+  source ./nginx_installer.sh >/dev/null 2>&1
+  download_modules >/dev/null 2>&1
+) && [[ ! -d "$WORK/no-module-run/modules" ]]; then
+  pass "does not fetch the bundle without MODULES"
+else
+  fail "does not fetch the bundle without MODULES"
+fi
+
+# Selected modules require the verified bundle; there is no upstream fallback.
+if (
+  export MODULES=headers-more
+  export TEMP_INSTALL_DIR="$WORK/no-bundle-run"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export PATH=${PATH#"$WORK/bin:"}
+  export MODULES_BUNDLE_URL="file://$WORK/missing.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/missing.sums"
+  # shellcheck source=/dev/null
+  source ./nginx_installer.sh >/dev/null 2>&1
+  download_modules
+) >/dev/null 2>&1; then
+  fail "fails when a selected module has no bundle"
+else
+  pass "fails when a selected module has no bundle"
 fi
 
 assert_contains "$(modules_bundle_url)" "/tmiland/nginx-modules/releases/latest/download/nginx-modules-full.tar.gz" "defaults to the latest full bundle"
@@ -178,41 +285,13 @@ else
   pass "fails when the bundle is missing"
 fi
 
-if ( BROTLI=y; modules_selected ); then
-  pass "detects a selected module"
-else
-  fail "detects a selected module"
-fi
-if ( BROTLI=n; HEADERMOD=n; modules_selected ); then
-  fail "detects no selected modules"
-else
-  pass "detects no selected modules"
-fi
-if grep -q 'ZSTD=y' README.md && ! grep -q 'ZSTF' README.md; then
-  pass "README documents ZSTD, not ZSTF"
-else
-  fail "README documents ZSTD, not ZSTF"
-fi
 
-
-assert_eq "14" "${#MODULE_PINS[@]}" "pins every git-based module"
-for name in brotli cachepurge subfilter modsecurity modsecurity_nginx fancyindex dav_ext vts rtmp testcookie redis2 srcache set_misc quiche; do
-  if [[ ${MODULE_PINS[$name]:-} =~ ^[0-9a-f]{40}$ ]]; then
-    pass "MODULE_PINS[$name] is a commit SHA"
-  else
-    fail "MODULE_PINS[$name] is a commit SHA"
-  fi
-done
-
-for var in BADBOT_REV TLSDYN_REV NGINX_AUTOINSTALL_REV OPENSSL_PATCH_REV; do
-  value=${!var:-}
-  if [[ $value =~ ^[0-9a-f]{40}$ ]]; then
-    pass "$var is a commit SHA"
-  else
-    fail "$var is a commit SHA"
-  fi
-done
-for var in SLIB_SHA256 BADBOT_SHA256 TLSDYN_SHA256 HTTP3_PATCH_SHA256 HPACK_HTTP3_PATCH_SHA256 HPACK_PATCH_SHA256 RUSTUP_X86_64_SHA256 RUSTUP_AARCH64_SHA256 MODSEC_CONF_SHA256; do
+if [[ ${BADBOT_REV:-} =~ ^[0-9a-f]{40}$ ]]; then
+  pass "BADBOT_REV is a commit SHA"
+else
+  fail "BADBOT_REV is a commit SHA"
+fi
+for var in SLIB_SHA256 BADBOT_SHA256 RUSTUP_X86_64_SHA256 RUSTUP_AARCH64_SHA256; do
   value=${!var:-}
   if [[ $value =~ ^[0-9a-f]{64}$ ]]; then
     pass "$var is a sha256"
@@ -286,6 +365,77 @@ else
   pass "rejects an invalid --profile"
 fi
 
+# Module selection by id. The old module flags no longer exist.
+assert_eq "headers-more zstd" "$(source_get MODULES_LIST --modules headers-more,zstd)" "--modules takes comma separated ids"
+assert_eq "headers-more zstd" "$(source_get MODULES_LIST -M "headers-more zstd")" "-M takes space separated ids"
+assert_eq "headers-more" "$(source_get MODULES_LIST --modules headers-more -M headers-more)" "--modules dedupes repeated ids"
+assert_eq "headers-more zstd" "$(MODULES='headers-more zstd' source_get MODULES_LIST)" "MODULES env selects ids"
+assert_eq "openssl" "$(SSL=2 source_get MODULES_LIST)" "SSL=2 appends openssl"
+assert_eq "libressl" "$(SSL=3 source_get MODULES_LIST)" "SSL=3 appends libressl"
+assert_eq "" "$(SSL=1 source_get MODULES_LIST)" "SSL=1 adds no TLS module"
+assert_eq "" "$(BROTLI=y LUA=y GEOIP=y MODSEC=y source_get MODULES_LIST)" "old module flags no longer select modules"
+assert_eq "headers-more fancyindex cachepurge subfilter webdav vts rtmp testcookie redis2 srcache set-misc echo zstd openssl" \
+  "$(source_get MODULES_LIST --modules-extra)" "--modules-extra appends the preset ids"
+assert_eq "zstd headers-more fancyindex cachepurge subfilter webdav vts rtmp testcookie redis2 srcache set-misc echo openssl" \
+  "$(source_get MODULES_LIST --modules zstd --modules-extra)" "--modules-extra composes with --modules"
+if ( source ./nginx_installer.sh --modules >/dev/null 2>&1 ); then
+  fail "rejects --modules without a value"
+else
+  pass "rejects --modules without a value"
+fi
+
+# GeoIP credentials: CLI parsing and env-file parsing without sourcing.
+mkdir -p "$WORK/credentials"
+cat > "$WORK/credentials/geoip.env" <<'EOF'
+# MaxMind credentials
+GEOIP2_ACCOUNT_ID=123456
+GEOIP2_LICENSE_KEY="fake-license-key"
+EOF
+assert_eq "$WORK/credentials/geoip.env" "$(source_get GEOIP_ENV_FILE --geoip-env-file "$WORK/credentials/geoip.env")" "--geoip-env-file is parsed"
+assert_eq "123456" "$(source_get GEOIP2_ACCOUNT_ID --geoip-account-id 123456)" "--geoip-account-id is parsed"
+assert_eq "fake" "$(source_get GEOIP2_LICENSE_KEY --geoip-license-key fake)" "--geoip-license-key is parsed"
+assert_eq "123456|fake-license-key" \
+  "$( ( load_geoip_env_file "$WORK/credentials/geoip.env"; printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY" ) )" \
+  "loads GeoIP credentials and strips quotes"
+printf 'GEOIP2_ACCOUNT_ID=42\r\nGEOIP2_LICENSE_KEY=line-key\r\n' > "$WORK/credentials/geoip-crlf.env"
+assert_eq "42|line-key" \
+  "$( ( load_geoip_env_file "$WORK/credentials/geoip-crlf.env"; printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY" ) )" \
+  "strips CR from GeoIP env files"
+cat > "$WORK/credentials/geoip-bad.env" <<'EOF'
+GEOIP2_ACCOUNT_ID=1
+GEOIP2_SECRET=not-allowed
+EOF
+if ( load_geoip_env_file "$WORK/credentials/geoip-bad.env" ) >/dev/null 2>&1; then
+  fail "rejects unknown GeoIP env keys"
+else
+  pass "rejects unknown GeoIP env keys"
+fi
+if ( HOME="$WORK/no-geoip-home" GEOIP_ENV_FILE='' GEOIP2_LICENSE_KEY=''; prepare_geoip_credentials ) >/dev/null 2>&1; then
+  fail "rejects a missing GeoIP license key"
+else
+  pass "rejects a missing GeoIP license key"
+fi
+mkdir -p "$WORK/geoip-home/.credentials"
+cp "$WORK/credentials/geoip.env" "$WORK/geoip-home/.credentials/geoip.env"
+assert_eq "123456|fake-license-key" \
+  "$( (
+    export HOME="$WORK/geoip-home"
+    GEOIP_ENV_FILE='' GEOIP2_ACCOUNT_ID='' GEOIP2_LICENSE_KEY=''
+    prepare_geoip_credentials
+    printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY"
+  ) )" \
+  "loads the default HOME GeoIP env file"
+if ( GEOIP_ENV_FILE="$WORK/credentials/geoip.env" GEOIP2_LICENSE_KEY=''; prepare_geoip_credentials ) >/dev/null 2>&1; then
+  pass "loads GeoIP credentials from the env file"
+else
+  fail "loads GeoIP credentials from the env file"
+fi
+if ( GEOIP_ENV_FILE='' GEOIP2_LICENSE_KEY=fake; prepare_geoip_credentials ) >/dev/null 2>&1; then
+  pass "accepts a GeoIP license key from the environment"
+else
+  fail "accepts a GeoIP license key from the environment"
+fi
+
 profile_modules() {
   local profile=$1
   (
@@ -337,6 +487,8 @@ assert_contains "$usage_out" "|-hl" "usage documents -hl for headless"
 assert_contains "$usage_out" "--bad-bot" "usage documents --bad-bot"
 assert_contains "$usage_out" "--detect" "usage documents --detect"
 assert_contains "$usage_out" "--profile" "usage documents --profile"
+assert_contains "$usage_out" "--modules" "usage documents --modules"
+assert_contains "$usage_out" "--geoip-env-file" "usage documents --geoip-env-file"
 assert_contains "$usage_out" "temporary build directory" "usage describes the build directory simply"
 if [[ $usage_out == *"(under /opt"* ]]; then
   fail "usage omits the build directory allowlist"

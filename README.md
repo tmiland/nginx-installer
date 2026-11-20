@@ -5,7 +5,6 @@
 
 
  ## Usage
- - Note: Use either headless or extra modules option
  ```bash
  Usage:  nginx_installer.sh [options]
    If called without arguments, installs stable nginx using /opt/nginx
@@ -16,10 +15,14 @@
    --mainline             |-m   mainline nginx version (auto-detected)
    --detect               |-dt  detect the distro and exit
    --headless             |-hl  headless install
-   --modules-extra        |-me  extra modules
+   --modules              |-M   module ids to build from the bundle (comma separated)
+   --modules-extra        |-me  preset: append the common extra module ids
    --profile              |-p   built-in module profile: minimal or full
    --modules-bundle       |-mb  module source bundle (default: full)
    --modules-rev          |-mr  nginx-modules release tag (default: latest)
+   --geoip-account-id          MaxMind account id for geoip2
+   --geoip-license-key         MaxMind license key for geoip2 (visible in ps)
+   --geoip-env-file            file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY
    --bad-bot              |-bb  install the bad bot blocker
    --dir                  |-d   temporary build directory
    --verbose              |-v   increase verbosity
@@ -30,43 +33,48 @@
    --uninstall            |-u   uninstall nginx
  ```
 
-- Options / modules can be overridden, just like [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall) 
-- (This is the same option as extra modules option.)
-
 ### Built-in module profile
 
 `MODULES_PROFILE=minimal` (default) builds only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support. `MODULES_PROFILE=full` restores the previous broad set: Perl, XSLT, mail, stream, DAV, FLV/MP4, HTTP/3, stub status, and the other optional modules. `NGINX_MODULES` still overrides both.
 
-### Module sources
+### Module selection
 
-Module sources come from a verified full bundle in [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) by default. The per-module flags above still select what gets compiled.
+Third-party modules are selected by id, not by per-module flags. The ids and their build steps live in `modules.conf` inside the verified [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) bundle; the bundle is the only module source. See that repository's README for the current id list.
 
+- `MODULES="headers-more,fancyindex,..."` or `--modules|-M <ids>` selects ids. `requires` are resolved recursively, so `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
+- No `MODULES` means no bundle download and no third-party modules.
+- `--modules-extra` is only a preset that appends `headers-more,fancyindex,cachepurge,subfilter,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd,openssl`.
+- `SSL=2`/`OPENSSL` appends `openssl`; `SSL=3`/`LIBRESSL` appends `libressl`; `SSL=1`/`SYSTEM` adds nothing.
+- The old module flags (`BROTLI`, `HEADERMOD`, `LUA`, `GEOIP`, `VTS`, `REDIS2`, `ZSTD`, `HTTP3`, `TLSDYN`, `HPACK`, and the rest) no longer exist and select nothing.
 - `MODULES_REV=latest` (default) uses the latest tested bundle; set a release tag to pin it.
-- `MODULES_BUNDLE=full` (default) downloads all module sources once. Use a bundle name for a smaller preset once published.
-- `MODULES_SKIP_BUNDLE=1` falls back to per-module upstream downloads.
+- `MODULES_BUNDLE=full` (default) downloads all module sources once.
+- `BADBOT=y` is a separate addon and is not a module id.
+
+### GeoIP credentials
+
+`geoip2` downloads the GeoLite2 databases from MaxMind. Put the credentials in a mode-0600 env file instead of on the command line:
+
+```bash
+GEOIP2_ACCOUNT_ID=...
+GEOIP2_LICENSE_KEY=...
+```
+
+```bash
+MODULES="geoip2" \
+GEOIP_ENV_FILE="$HOME/.credentials/geoip.env" \
+./nginx_installer.sh
+# or: ./nginx_installer.sh --modules geoip2 --geoip-env-file "$HOME/.credentials/geoip.env"
+```
+
+If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoip.env` automatically.
+
+`--geoip-account-id` and `--geoip-license-key` also exist, but a key passed in argv is visible in `ps`; prefer the env file or environment variables. The file is parsed, not sourced: only the two keys above are accepted.
+
+### Example
 
  ```bash
  HEADLESS=y \
- PAGESPEED=n \
- BROTLI=n \
- HEADERMOD=y \
- GEOIP=y \
- GEOIP2_ACCOUNT_ID=<YOUR GEOIP2_ACCOUNT_ID> \
- GEOIP2_LICENSE_KEY=<YOUR GEOIP2_LICENSE_KEY> \
- FANCYINDEX=y \
- CACHEPURGE=y \
- SUBFILTER=y \
- LUA=y \
- WEBDAV=y \
- VTS=y \
- RTMP=y \
- TESTCOOKIE=y \
- REDIS2=y \
- HTTPREDIS=n \
- SRCACHE=y \
- SETMISC=y \
- NGXECHO=y \
- ZSTD=y \
+ MODULES="headers-more,fancyindex,cachepurge,subfilter,lua-nginx,lua-resty-core,lua-resty-lrucache,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd" \
  BADBOT=y \
  ./nginx_installer.sh 2>&1 | tee nginx-installer.log
  ```
