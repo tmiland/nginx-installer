@@ -1460,7 +1460,7 @@ download_modules() {
 }
 
 configure() {
-  auto/configure $NGINX_OPTIONS $NGINX_MODULES
+  ./configure $NGINX_OPTIONS $NGINX_MODULES
   # --with-debug
 }
 
@@ -1560,7 +1560,7 @@ install_nginx() {
   run_ok "download_modules" "Downloading modules..."
   log_success "Module download finished"
   if [ -d "$TEMP_INSTALL_DIR"/nginx-"${NGINX_VER}" ]; then
-    (
+    if ! (
       cd "$TEMP_INSTALL_DIR"/nginx-"${NGINX_VER}" || exit 1
       echo
       # Config
@@ -1689,7 +1689,9 @@ EOF
 			fi
       log_success "Installation finished"
       cd - 1>/dev/null 2>&1 || exit 1
-    )
+    ); then
+      fatal "nginx build failed; see $LOGFILE"
+    fi
   else
     fatal "nginx source directory is missing: $TEMP_INSTALL_DIR/nginx-$NGINX_VER"
   fi

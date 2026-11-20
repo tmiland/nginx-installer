@@ -184,6 +184,11 @@ if grep -q 'curl -sSL https://github.com' README.md; then
 else
   pass "README uses curl -fsSL"
 fi
+if grep -q '^  ./configure ' nginx_installer.sh; then
+  pass "uses the release tarball configure script"
+else
+  fail "uses the release tarball configure script"
+fi
 
 
 # ---------------------------------------------------------------------------
