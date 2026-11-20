@@ -185,6 +185,82 @@ fetch_nginx_source() {
   rm -rf -- "$tmp"
   log_info "Verified nginx ${version} source (PGP)"
 }
+# True when at least one source module is selected.
+modules_selected() {
+  local flag
+  for flag in PAGESPEED BROTLI HEADERMOD GEOIP FANCYINDEX CACHEPURGE SUBFILTER \
+    LUA WEBDAV VTS RTMP TESTCOOKIE REDIS2 HTTPREDIS SRCACHE SETMISC NGXECHO \
+    ZSTD MODSEC HTTP3 TLSDYN HPACK; do
+    [[ ${!flag:-n} == y ]] && return 0
+  done
+  return 1
+}
+# Resolve the release asset for the selected module bundle.
+modules_bundle_url() {
+  local base
+  if [[ -n $MODULES_BUNDLE_URL ]]; then
+    printf '%s' "$MODULES_BUNDLE_URL"
+    return 0
+  fi
+  [[ -n $MODULES_REPO && -n $MODULES_BUNDLE ]] || return 1
+  if [[ $MODULES_REV == latest ]]; then
+    base="https://github.com/$MODULES_REPO/releases/latest/download"
+  else
+    base="https://github.com/$MODULES_REPO/releases/download/$MODULES_REV"
+  fi
+  printf '%s/nginx-modules-%s.tar.gz' "$base" "$MODULES_BUNDLE"
+}
+# Download and verify the full module source bundle, then extract it into
+# $TEMP_INSTALL_DIR/modules. The bundle is the primary source; per-module
+# downloads remain only as a fallback for modules missing from it.
+fetch_modules_bundle() {
+  local url sums tmp archive extract src
+  [[ $MODULES_SKIP_BUNDLE == 1 ]] && return 0
+  url=$(modules_bundle_url) || return 1
+  sums=${MODULES_SUMS_URL:-$(dirname -- "$url")/SHA256SUMS}
+  tmp=$(mktemp -d "$TEMP_INSTALL_DIR/modules-download.XXXXXX") || return 1
+  archive=$tmp/nginx-modules-${MODULES_BUNDLE}.tar.gz
+  curl -fsSL "$url" -o "$archive" || { rm -rf "$tmp"; return 1; }
+  curl -fsSL "$sums" -o "$tmp/SHA256SUMS" || { rm -rf "$tmp"; return 1; }
+  ( cd "$tmp" && grep -E "[ *]nginx-modules-${MODULES_BUNDLE}\.tar\.gz$" SHA256SUMS | sha256sum -c - ) ||
+    { rm -rf "$tmp"; return 1; }
+  extract=$tmp/extract
+  mkdir -p "$extract" || { rm -rf "$tmp"; return 1; }
+  tar -xzf "$archive" -C "$extract" --no-same-owner || { rm -rf "$tmp"; return 1; }
+  if [[ -d $extract/modules ]]; then
+    src=$extract
+  elif [[ -d $extract/$MODULES_BUNDLE/modules ]]; then
+    src=$extract/$MODULES_BUNDLE
+  else
+    src=$(dirname -- "$(find "$extract" -maxdepth 2 -type d -name modules -print -quit)") || true
+  fi
+  [[ -n ${src:-} && -d $src/modules ]] || { rm -rf "$tmp"; return 1; }
+  mkdir -p "$TEMP_INSTALL_DIR/modules" || { rm -rf "$tmp"; return 1; }
+  cp -a "$src/modules/." "$TEMP_INSTALL_DIR/modules/" || { rm -rf "$tmp"; return 1; }
+  cp -a "$src/versions.conf" "$TEMP_INSTALL_DIR/versions.conf" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  log_info "Verified nginx-modules ${MODULES_BUNDLE} bundle (${MODULES_REV})"
+}
+# Load module versions from the verified bundle without sourcing it.
+load_module_versions() {
+  local conf=$TEMP_INSTALL_DIR/versions.conf line key value
+  [[ -f $conf ]] || return 1
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ -z $line || $line == \#* ]] && continue
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      NPS_VER|HEADERMOD_VER|LIBMAXMINDDB_VER|GEOIP2_VER|LUA_JIT_VER|LUA_NGINX_VER|LUA_RESTYCORE_VER|LUA_RESTYLRUACHE_VER|NGINX_DEV_KIT|HTTPREDIS_VER|NGXECHO_VER|ZSTD_VER|OPENSSL_VER|LIBRESSL_VER)
+        printf -v "$key" '%s' "$value"
+        ;;
+      *)
+        log_warning "Unknown module version key in bundle: $key"
+        return 1
+        ;;
+    esac
+  done < "$conf"
+}
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
   local dir=${1:-} canonical
@@ -320,20 +396,29 @@ SLIB_REV=595e489b7a6e4d6662333608d4056b519a75272a
 SLIB_SHA256=b59fe3a9ede69a7e58af2c395b7cc7d655f96346a365abdd21f8471cce0ed036
 SLIB_URL=${SLIB_URL:-https://raw.githubusercontent.com/$REPO_NAME/$SLIB_REV/src/slib.sh}
 
+# Module source bundle. Full is the default; individual module flags still
+# decide what gets compiled.
+MODULES_REPO=${MODULES_REPO:-tmiland/nginx-modules}
+MODULES_REV=${MODULES_REV:-latest}
+MODULES_BUNDLE=${MODULES_BUNDLE:-full}
+MODULES_BUNDLE_URL=${MODULES_BUNDLE_URL:-}
+MODULES_SUMS_URL=${MODULES_SUMS_URL:-}
+MODULES_SKIP_BUNDLE=${MODULES_SKIP_BUNDLE:-0}
+
 # Define module versions
-LIBRESSL_VER=${LIBRESSL_VER:-4.1.0}
-OPENSSL_VER=${OPENSSL_VER:-3.5.1}
+LIBRESSL_VER=${LIBRESSL_VER:-4.4.1}
+OPENSSL_VER=${OPENSSL_VER:-3.5.9}
 NPS_VER=${NPS_VER:-1.13.35.2}
-HEADERMOD_VER=${HEADERMOD_VER:-0.39}
-LIBMAXMINDDB_VER=${LIBMAXMINDDB_VER:-1.12.2}
+HEADERMOD_VER=${HEADERMOD_VER:-0.42}
+LIBMAXMINDDB_VER=${LIBMAXMINDDB_VER:-1.14.1}
 GEOIP2_VER=${GEOIP2_VER:-3.4}
-LUA_JIT_VER=${LUA_JIT_VER:-2.1-20250529}
-LUA_NGINX_VER=${LUA_NGINX_VER:-0.10.28}
-LUA_RESTYCORE_VER=${LUA_RESTYCORE_VER:-0.1.31}
+LUA_JIT_VER=${LUA_JIT_VER:-2.1-20261117}
+LUA_NGINX_VER=${LUA_NGINX_VER:-0.10.31}
+LUA_RESTYCORE_VER=${LUA_RESTYCORE_VER:-0.1.32}
 LUA_RESTYLRUCACHE_VER=${LUA_RESTYLRUCACHE_VER:-0.15}
 NGINX_DEV_KIT=${NGINX_DEV_KIT:-0.3.4}
-HTTPREDIS_VER=${HTTPREDIS_VER:-0.3.9}
-NGXECHO_VER=${NGXECHO_VER:-0.63}
+HTTPREDIS_VER=${HTTPREDIS_VER:-0.4.2-build5}
+NGXECHO_VER=${NGXECHO_VER:-0.66}
 ZSTD_VER=${ZSTD_VER:-0.1.1}
 
 # Pinned revisions for git-based modules. Fetched by SHA, so a branch moving
@@ -626,8 +711,11 @@ usage() {
   printf "%s\\n" "  ${YELLOW}--detect               |-dt${NORMAL}  detect the distro and exit"
 	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  extra modules"
+	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
+	printf "%s\\n" "  ${YELLOW}--modules-bundle       |-mb${NORMAL}  module source bundle (default: full)"
+	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
 	printf "%s\\n" "  ${YELLOW}--bad-bot              |-bb${NORMAL}  install the bad bot blocker"
-  printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory (under /opt, /usr/local, /var/tmp, /tmp, /home, /root, or /srv)"
+  printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory"
   printf "%s\\n" "  ${YELLOW}--verbose              |-v${NORMAL}   increase verbosity"
   printf "%s\\n" "  ${YELLOW}--nproc                |-n${NORMAL}   set the number of processing units to use"
   printf "%s\\n" "  ${YELLOW}--enable-debug-info    |-edi${NORMAL} enable debug info"
@@ -682,6 +770,24 @@ while [[ $# -gt 0 ]]; do
 			shift
 			MODULES_EXTRA=y
 			;;
+		--profile | -p)
+			case "${2:-}" in
+				minimal | full) ;;
+				*) fatal "Option --profile requires 'minimal' or 'full'." ;;
+			esac
+			MODULES_PROFILE=$2
+			shift 2
+			;;
+		--modules-bundle | -mb)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules-bundle requires a bundle name."
+			MODULES_BUNDLE=$2
+			shift 2
+			;;
+		--modules-rev | -mr)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules-rev requires a release tag."
+			MODULES_REV=$2
+			shift 2
+			;;
 		--bad-bot | -bb)
 			shift
 			BADBOT=y
@@ -728,6 +834,63 @@ while [[ $# -gt 0 ]]; do
 done
 
 set -- "${POSITIONAL_ARGS[@]}" # restore positional parameters
+
+# Define default modules
+MODULES_PROFILE=${MODULES_PROFILE:-minimal}
+case "$MODULES_PROFILE" in
+  minimal)
+    DEFAULT_NGINX_MODULES="--with-threads \
+--with-file-aio \
+--with-http_ssl_module \
+--with-http_v2_module \
+--with-http_realip_module \
+--with-compat \
+--with-pcre \
+--with-pcre-jit"
+    ;;
+  full)
+    DEFAULT_NGINX_MODULES="--with-select_module \
+--with-poll_module \
+--with-threads \
+--with-file-aio \
+--with-http_ssl_module \
+--with-http_v2_module \
+--with-http_v3_module \
+--with-http_realip_module \
+--with-http_addition_module \
+--with-http_xslt_module \
+--with-http_sub_module \
+--with-http_dav_module \
+--with-http_flv_module \
+--with-http_mp4_module \
+--with-http_gunzip_module \
+--with-http_gzip_static_module \
+--with-http_auth_request_module \
+--with-http_random_index_module \
+--with-http_secure_link_module \
+--with-http_degradation_module \
+--with-http_slice_module \
+--with-http_stub_status_module \
+--with-http_perl_module \
+--with-mail \
+--with-mail_ssl_module \
+--without-mail_pop3_module \
+--without-mail_imap_module \
+--without-mail_smtp_module \
+--with-stream \
+--with-stream_ssl_module \
+--with-stream_realip_module \
+--with-stream_ssl_preread_module \
+--with-cpp_test_module \
+--with-compat \
+--with-pcre \
+--with-pcre-jit"
+    ;;
+  *)
+    fatal "Unknown MODULES_PROFILE: '$MODULES_PROFILE' (expected minimal or full)"
+    ;;
+esac
+NGINX_MODULES=${NGINX_MODULES:-$DEFAULT_NGINX_MODULES}
 
 # Allow the test suite to source the helpers and option parser without
 # running an install.
@@ -820,7 +983,7 @@ if [[ $DISTRO_GROUP == "Debian" ]]; then
   INSTALL="apt-get -o Dpkg::Progress-Fancy=1 install -qq"
   PKGCHK="dpkg -s"
   # Install packages
-  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev gnupg"
+  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev gnupg libzstd-dev"
 else
   echo -e "${RED}${BALLOT_X} Error: Sorry, your OS is not supported.${NORMAL}"
   exit 1;
@@ -911,43 +1074,6 @@ NGINX_OPTIONS=${NGINX_OPTIONS:-"
 --with-cc-opt=-Wno-deprecated-declarations \
 --with-cc-opt=-Wno-ignored-qualifiers"}
 
-# Define default modules
-NGINX_MODULES=${NGINX_MODULES:-"--with-select_module \
---with-poll_module \
---with-threads \
---with-file-aio \
---with-http_ssl_module \
---with-http_v2_module \
---with-http_v3_module \
---with-http_realip_module \
---with-http_addition_module \
---with-http_xslt_module \
---with-http_sub_module \
---with-http_dav_module \
---with-http_flv_module \
---with-http_mp4_module \
---with-http_gunzip_module \
---with-http_gzip_static_module \
---with-http_auth_request_module \
---with-http_random_index_module \
---with-http_secure_link_module \
---with-http_degradation_module \
---with-http_slice_module \
---with-http_stub_status_module \
---with-http_perl_module \
---with-mail \
---with-mail_ssl_module \
---without-mail_pop3_module \
---without-mail_imap_module \
---without-mail_smtp_module \
---with-stream \
---with-stream_ssl_module \
---with-stream_realip_module \
---with-stream_ssl_preread_module \
---with-cpp_test_module \
---with-compat \
---with-pcre \
---with-pcre-jit"}
 
 case $SSL in
 1 | SYSTEM)
@@ -966,12 +1092,25 @@ esac
 
 download_modules() {
 
+	# Prefer the verified module bundle; per-module downloads are fallback.
+	if modules_selected; then
+		if [[ $MODULES_SKIP_BUNDLE == 1 ]]; then
+			log_warning "Module bundle skipped; using upstream sources."
+		elif fetch_modules_bundle; then
+			load_module_versions || exit 1
+		else
+			log_warning "Module bundle unavailable; using upstream sources."
+		fi
+	fi
+
 	# PageSpeed
 	if [[ $PAGESPEED == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/pagespeed/ngx_pagespeed/archive/v${NPS_VER}-stable.zip
-		unzip v${NPS_VER}-stable.zip
-		cd incubator-pagespeed-ngx-${NPS_VER}-stable || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/incubator-pagespeed-ngx-${NPS_VER}-stable" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget https://github.com/pagespeed/ngx_pagespeed/archive/v${NPS_VER}-stable.zip
+			unzip v${NPS_VER}-stable.zip
+		fi
+		cd "$TEMP_INSTALL_DIR/modules/incubator-pagespeed-ngx-${NPS_VER}-stable" || exit 1
 		psol_url=https://dl.google.com/dl/page-speed/psol/${NPS_VER}.tar.gz
 		[ -e scripts/format_binary_url.sh ] && psol_url=$(scripts/format_binary_url.sh PSOL_BINARY_URL)
 		wget "${psol_url}"
@@ -980,24 +1119,30 @@ download_modules() {
 
 	#Brotli
 	if [[ $BROTLI == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		clone_pinned brotli https://github.com/google/ngx_brotli "$TEMP_INSTALL_DIR/modules/ngx_brotli" || exit 1
-		git -C "$TEMP_INSTALL_DIR/modules/ngx_brotli" submodule update --init --recursive --depth 1 || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_brotli" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			clone_pinned brotli https://github.com/google/ngx_brotli "$TEMP_INSTALL_DIR/modules/ngx_brotli" || exit 1
+			git -C "$TEMP_INSTALL_DIR/modules/ngx_brotli" submodule update --init --recursive --depth 1 || exit 1
+		fi
 	fi
 
 	# More Headers
 	if [[ $HEADERMOD == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/openresty/headers-more-nginx-module/archive/v${HEADERMOD_VER}.tar.gz
-		tar xaf v${HEADERMOD_VER}.tar.gz
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/headers-more-nginx-module-${HEADERMOD_VER}" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget https://github.com/openresty/headers-more-nginx-module/archive/v${HEADERMOD_VER}.tar.gz
+			tar xaf v${HEADERMOD_VER}.tar.gz
+		fi
 	fi
 
 	# GeoIP
 	if [[ $GEOIP == 'y' ]]; then
 			cd "$TEMP_INSTALL_DIR"/modules || exit 1
 			# install libmaxminddb
-			wget https://github.com/maxmind/libmaxminddb/releases/download/${LIBMAXMINDDB_VER}/libmaxminddb-${LIBMAXMINDDB_VER}.tar.gz
-			tar xaf libmaxminddb-${LIBMAXMINDDB_VER}.tar.gz
+			if [[ ! -d "libmaxminddb-${LIBMAXMINDDB_VER}" ]]; then
+				wget https://github.com/maxmind/libmaxminddb/releases/download/${LIBMAXMINDDB_VER}/libmaxminddb-${LIBMAXMINDDB_VER}.tar.gz
+				tar xaf libmaxminddb-${LIBMAXMINDDB_VER}.tar.gz
+			fi
 			cd libmaxminddb-${LIBMAXMINDDB_VER}/ || exit 1
 			./configure
 			make -j "$(nproc)"
@@ -1005,10 +1150,12 @@ download_modules() {
 			ldconfig
 
 			cd ../ || exit 1
-			wget https://github.com/leev/ngx_http_geoip2_module/archive/${GEOIP2_VER}.tar.gz
-			tar xaf ${GEOIP2_VER}.tar.gz
+			if [[ ! -d "ngx_http_geoip2_module-${GEOIP2_VER}" ]]; then
+				wget https://github.com/leev/ngx_http_geoip2_module/archive/${GEOIP2_VER}.tar.gz
+				tar xaf ${GEOIP2_VER}.tar.gz
+			fi
 
-			mkdir geoip-db
+			mkdir -p geoip-db
 			cd geoip-db || exit 1
 			# - Download GeoLite2 databases using the license key
 			# - Keep the key out of argv and the log: curl reads the URL from
@@ -1083,57 +1230,74 @@ download_modules() {
 
 	# Cache Purge
 	if [[ $CACHEPURGE == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		clone_pinned cachepurge https://github.com/FRiCKLE/ngx_cache_purge "$TEMP_INSTALL_DIR/modules/ngx_cache_purge" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_cache_purge" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			clone_pinned cachepurge https://github.com/FRiCKLE/ngx_cache_purge "$TEMP_INSTALL_DIR/modules/ngx_cache_purge" || exit 1
+		fi
 	fi
 
 	# Nginx Substitutions Filter
 	if [[ $SUBFILTER == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		clone_pinned subfilter https://github.com/yaoweibin/ngx_http_substitutions_filter_module "$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			clone_pinned subfilter https://github.com/yaoweibin/ngx_http_substitutions_filter_module "$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module" || exit 1
+		fi
 	fi
 
 	# Lua
 	if [[ $LUA == 'y' ]]; then
 		# LuaJIT download
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/openresty/luajit2/archive/v${LUA_JIT_VER}.tar.gz
-		tar xaf v${LUA_JIT_VER}.tar.gz
+		if [[ ! -d "luajit2-${LUA_JIT_VER}" ]]; then
+			wget https://github.com/openresty/luajit2/archive/v${LUA_JIT_VER}.tar.gz
+			tar xaf v${LUA_JIT_VER}.tar.gz
+		fi
 		cd luajit2-${LUA_JIT_VER} || exit 1
 		make -j "$(nproc)"
 		make install
 
 		# ngx_devel_kit download
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/simplresty/ngx_devel_kit/archive/v${NGINX_DEV_KIT}.tar.gz
-		tar xaf v${NGINX_DEV_KIT}.tar.gz
+		if [[ ! -d "ngx_devel_kit-${NGINX_DEV_KIT}" ]]; then
+			wget https://github.com/simplresty/ngx_devel_kit/archive/v${NGINX_DEV_KIT}.tar.gz
+			tar xaf v${NGINX_DEV_KIT}.tar.gz
+		fi
 
 		# lua-nginx-module download
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/openresty/lua-nginx-module/archive/v${LUA_NGINX_VER}.tar.gz
-		tar xaf v${LUA_NGINX_VER}.tar.gz
+		if [[ ! -d "lua-nginx-module-${LUA_NGINX_VER}" ]]; then
+			wget https://github.com/openresty/lua-nginx-module/archive/v${LUA_NGINX_VER}.tar.gz
+			tar xaf v${LUA_NGINX_VER}.tar.gz
+		fi
 
 		# lua-resty-core download
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/openresty/lua-resty-core/archive/v${LUA_RESTYCORE_VER}.tar.gz
-		tar xaf v${LUA_RESTYCORE_VER}.tar.gz
+		if [[ ! -d "lua-resty-core-${LUA_RESTYCORE_VER}" ]]; then
+			wget https://github.com/openresty/lua-resty-core/archive/v${LUA_RESTYCORE_VER}.tar.gz
+			tar xaf v${LUA_RESTYCORE_VER}.tar.gz
+		fi
 		cd lua-resty-core-${LUA_RESTYCORE_VER} || exit 1
 		make install PREFIX=/etc/nginx
 
 		# lua-resty-lrucache download
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/openresty/lua-resty-lrucache/archive/v${LUA_RESTYLRUCACHE_VER}.tar.gz
-		tar xaf v${LUA_RESTYLRUCACHE_VER}.tar.gz
+		if [[ ! -d "lua-resty-lrucache-${LUA_RESTYLRUCACHE_VER}" ]]; then
+			wget https://github.com/openresty/lua-resty-lrucache/archive/v${LUA_RESTYLRUCACHE_VER}.tar.gz
+			tar xaf v${LUA_RESTYLRUCACHE_VER}.tar.gz
+		fi
 		cd lua-resty-lrucache-${LUA_RESTYLRUCACHE_VER} || exit 1
 		make install PREFIX=/etc/nginx
 	fi
 
 	# LibreSSL
 	if [[ $LIBRESSL == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		mkdir libressl-${LIBRESSL_VER}
-		cd libressl-${LIBRESSL_VER} || exit 1
-		wget -qO- http://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${LIBRESSL_VER}.tar.gz | tar xz --strip 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/libressl-${LIBRESSL_VER}" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			mkdir libressl-${LIBRESSL_VER}
+			cd libressl-${LIBRESSL_VER} || exit 1
+			wget -qO- http://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${LIBRESSL_VER}.tar.gz | tar xz --strip 1
+		fi
+		cd "$TEMP_INSTALL_DIR/modules/libressl-${LIBRESSL_VER}" || exit 1
 
 		./configure \
 			LDFLAGS=-lrt \
@@ -1146,20 +1310,25 @@ download_modules() {
 
 	# OpenSSL
 	if [[ $OPENSSL == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
-		tar xaf openssl-${OPENSSL_VER}.tar.gz
-		cd openssl-${OPENSSL_VER} || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/openssl-${OPENSSL_VER}" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
+			tar xaf openssl-${OPENSSL_VER}.tar.gz
+		fi
+		cd "$TEMP_INSTALL_DIR/modules/openssl-${OPENSSL_VER}" || exit 1
 
 		./config
 	fi
 
 	# ModSecurity
 	if [[ $MODSEC == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		clone_pinned modsecurity https://github.com/SpiderLabs/ModSecurity "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ModSecurity" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			clone_pinned modsecurity https://github.com/SpiderLabs/ModSecurity "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
+			cd "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
+			git submodule update --init --recursive --depth 1 || exit 1
+		fi
 		cd "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
-		git submodule update --init --recursive --depth 1 || exit 1
 		./build.sh
 		./configure
 		make -j "$(nproc)"
@@ -1176,29 +1345,38 @@ download_modules() {
 
 	# Download ngx_http_redis
 	if [[ $HTTPREDIS == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://people.freebsd.org/~osa/ngx_http_redis-${HTTPREDIS_VER}.tar.gz
-		tar xaf ngx_http_redis-${HTTPREDIS_VER}.tar.gz
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_http_redis-${HTTPREDIS_VER}" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget -O "ngx_http_redis-${HTTPREDIS_VER}.tar.gz" "https://github.com/osokin/ngx_http_redis/archive/refs/tags/${HTTPREDIS_VER}.tar.gz"
+			tar xaf ngx_http_redis-${HTTPREDIS_VER}.tar.gz
+		fi
 	fi
 
 	# Download ngx_devel_kit if LUA = no
 	if [[ $SETMISC == 'y' && $LUA == 'n' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/simplresty/ngx_devel_kit/archive/v${NGINX_DEV_KIT}.tar.gz
-		tar xaf v${NGINX_DEV_KIT}.tar.gz
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_devel_kit-${NGINX_DEV_KIT}" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget https://github.com/simplresty/ngx_devel_kit/archive/v${NGINX_DEV_KIT}.tar.gz
+			tar xaf v${NGINX_DEV_KIT}.tar.gz
+		fi
 	fi
 
 	# Download echo-nginx-module
 	if [[ $NGXECHO == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/openresty/echo-nginx-module/archive/refs/tags/v${NGXECHO_VER}.tar.gz
-		tar xaf v${NGXECHO_VER}.tar.gz
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/echo-nginx-module-${NGXECHO_VER}" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget https://github.com/openresty/echo-nginx-module/archive/refs/tags/v${NGXECHO_VER}.tar.gz
+			tar xaf v${NGXECHO_VER}.tar.gz
+		fi
 	fi
 
 	if [[ $ZSTD == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		wget https://github.com/tokers/zstd-nginx-module/archive/refs/tags/${ZSTD_VER}.tar.gz
-		tar xaf ${ZSTD_VER}.tar.gz
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/zstd-nginx-module" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			wget https://github.com/tokers/zstd-nginx-module/archive/refs/tags/${ZSTD_VER}.tar.gz
+			tar xaf ${ZSTD_VER}.tar.gz
+			[[ -d "zstd-nginx-module-${ZSTD_VER}" ]] && mv "zstd-nginx-module-${ZSTD_VER}" zstd-nginx-module
+		fi
 	fi
 
 	# Optional options
@@ -1284,7 +1462,9 @@ download_modules() {
 	fi
 
 	if [[ $FANCYINDEX == 'y' ]]; then
-		clone_pinned fancyindex https://github.com/aperezdc/ngx-fancyindex.git "$TEMP_INSTALL_DIR/modules/fancyindex" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/fancyindex" ]]; then
+			clone_pinned fancyindex https://github.com/aperezdc/ngx-fancyindex.git "$TEMP_INSTALL_DIR/modules/fancyindex" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/fancyindex
@@ -1292,7 +1472,9 @@ download_modules() {
 	fi
 
 	if [[ $WEBDAV == 'y' ]]; then
-		clone_pinned dav_ext https://github.com/arut/nginx-dav-ext-module.git "$TEMP_INSTALL_DIR/modules/nginx-dav-ext-module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/nginx-dav-ext-module" ]]; then
+			clone_pinned dav_ext https://github.com/arut/nginx-dav-ext-module.git "$TEMP_INSTALL_DIR/modules/nginx-dav-ext-module" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --with-http_dav_module --add-module="$TEMP_INSTALL_DIR"/modules/nginx-dav-ext-module
@@ -1300,7 +1482,9 @@ download_modules() {
 	fi
 
 	if [[ $VTS == 'y' ]]; then
-		clone_pinned vts https://github.com/vozlt/nginx-module-vts.git "$TEMP_INSTALL_DIR/modules/nginx-module-vts" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/nginx-module-vts" ]]; then
+			clone_pinned vts https://github.com/vozlt/nginx-module-vts.git "$TEMP_INSTALL_DIR/modules/nginx-module-vts" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/nginx-module-vts
@@ -1308,7 +1492,9 @@ download_modules() {
 	fi
 
 	if [[ $RTMP == 'y' ]]; then
-		clone_pinned rtmp https://github.com/arut/nginx-rtmp-module.git "$TEMP_INSTALL_DIR/modules/nginx-rtmp-module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/nginx-rtmp-module" ]]; then
+			clone_pinned rtmp https://github.com/arut/nginx-rtmp-module.git "$TEMP_INSTALL_DIR/modules/nginx-rtmp-module" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/nginx-rtmp-module
@@ -1316,7 +1502,9 @@ download_modules() {
 	fi
 
 	if [[ $TESTCOOKIE == 'y' ]]; then
-		clone_pinned testcookie https://github.com/kyprizel/testcookie-nginx-module.git "$TEMP_INSTALL_DIR/modules/testcookie-nginx-module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/testcookie-nginx-module" ]]; then
+			clone_pinned testcookie https://github.com/kyprizel/testcookie-nginx-module.git "$TEMP_INSTALL_DIR/modules/testcookie-nginx-module" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/testcookie-nginx-module
@@ -1324,7 +1512,9 @@ download_modules() {
 	fi
 
 	if [[ $MODSEC == 'y' ]]; then
-		clone_pinned modsecurity_nginx https://github.com/SpiderLabs/ModSecurity-nginx.git "$TEMP_INSTALL_DIR/modules/ModSecurity-nginx" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ModSecurity-nginx" ]]; then
+			clone_pinned modsecurity_nginx https://github.com/SpiderLabs/ModSecurity-nginx.git "$TEMP_INSTALL_DIR/modules/ModSecurity-nginx" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/ModSecurity-nginx
@@ -1332,7 +1522,9 @@ download_modules() {
 	fi
 
 	if [[ $REDIS2 == 'y' ]]; then
-		clone_pinned redis2 https://github.com/openresty/redis2-nginx-module.git "$TEMP_INSTALL_DIR/modules/redis2-nginx-module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/redis2-nginx-module" ]]; then
+			clone_pinned redis2 https://github.com/openresty/redis2-nginx-module.git "$TEMP_INSTALL_DIR/modules/redis2-nginx-module" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/redis2-nginx-module
@@ -1347,7 +1539,9 @@ download_modules() {
 	fi
 
 	if [[ $SRCACHE == 'y' ]]; then
-		clone_pinned srcache https://github.com/openresty/srcache-nginx-module.git "$TEMP_INSTALL_DIR/modules/srcache-nginx-module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/srcache-nginx-module" ]]; then
+			clone_pinned srcache https://github.com/openresty/srcache-nginx-module.git "$TEMP_INSTALL_DIR/modules/srcache-nginx-module" || exit 1
+		fi
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/srcache-nginx-module
@@ -1355,7 +1549,9 @@ download_modules() {
 	fi
 
 	if [[ $SETMISC == 'y' ]]; then
-		clone_pinned set_misc https://github.com/openresty/set-misc-nginx-module.git "$TEMP_INSTALL_DIR/modules/set-misc-nginx-module" || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/set-misc-nginx-module" ]]; then
+			clone_pinned set_misc https://github.com/openresty/set-misc-nginx-module.git "$TEMP_INSTALL_DIR/modules/set-misc-nginx-module" || exit 1
+		fi
 	if [[ $LUA == 'n' ]]; then
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
@@ -1391,9 +1587,11 @@ download_modules() {
 
 	# HTTP3
 	if [[ $HTTP3 == 'y' ]]; then
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		clone_pinned quiche https://github.com/cloudflare/quiche "$TEMP_INSTALL_DIR/modules/quiche" || exit 1
-		git -C "$TEMP_INSTALL_DIR/modules/quiche" submodule update --init --recursive --depth 1 || exit 1
+		if [[ ! -d "$TEMP_INSTALL_DIR/modules/quiche" ]]; then
+			cd "$TEMP_INSTALL_DIR"/modules || exit 1
+			clone_pinned quiche https://github.com/cloudflare/quiche "$TEMP_INSTALL_DIR/modules/quiche" || exit 1
+			git -C "$TEMP_INSTALL_DIR/modules/quiche" submodule update --init --recursive --depth 1 || exit 1
+		fi
 		# Dependencies for BoringSSL and Quiche
 		apt-get install -y golang
 		# Rust is not packaged at a new enough version, so use a pinned

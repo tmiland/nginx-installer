@@ -17,6 +17,9 @@
    --detect               |-dt  detect the distro and exit
    --headless             |-hl  headless install
    --modules-extra        |-me  extra modules
+   --profile              |-p   built-in module profile: minimal or full
+   --modules-bundle       |-mb  module source bundle (default: full)
+   --modules-rev          |-mr  nginx-modules release tag (default: latest)
    --bad-bot              |-bb  install the bad bot blocker
    --dir                  |-d   temporary build directory
    --verbose              |-v   increase verbosity
@@ -29,6 +32,18 @@
 
 - Options / modules can be overridden, just like [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall) 
 - (This is the same option as extra modules option.)
+
+### Built-in module profile
+
+`MODULES_PROFILE=minimal` (default) builds only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support. `MODULES_PROFILE=full` restores the previous broad set: Perl, XSLT, mail, stream, DAV, FLV/MP4, HTTP/3, stub status, and the other optional modules. `NGINX_MODULES` still overrides both.
+
+### Module sources
+
+Module sources come from a verified full bundle in [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) by default. The per-module flags above still select what gets compiled.
+
+- `MODULES_REV=latest` (default) uses the latest tested bundle; set a release tag to pin it.
+- `MODULES_BUNDLE=full` (default) downloads all module sources once. Use a bundle name for a smaller preset once published.
+- `MODULES_SKIP_BUNDLE=1` falls back to per-module upstream downloads.
 
  ```bash
  HEADLESS=y \
@@ -51,7 +66,7 @@
  SRCACHE=y \
  SETMISC=y \
  NGXECHO=y \
- ZSTF=y \
+ ZSTD=y \
  BADBOT=y \
  ./nginx_installer.sh 2>&1 | tee nginx-installer.log
  ```
@@ -107,6 +122,8 @@ To install this script:
   nginx source tarballs are PGP-verified against the pinned nginx.org signing keys; `src/slib.sh` and third-party modules are pinned and checksum-verified.
 
 #### Compile options With headless
+
+The examples below use `MODULES_PROFILE=full`; the default minimal build includes only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support.
 
 ```bash
 nginx -V

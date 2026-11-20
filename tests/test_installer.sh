@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016,SC2030,SC2031
+# shellcheck disable=SC2016,SC2030,SC2031,SC2317
 # Unit tests for nginx_installer.sh. No install is performed: the script is
 # sourced with NGINX_INSTALLER_LIB_ONLY=1, which returns after option parsing.
 
@@ -107,6 +107,10 @@ assert_function download_verified
 assert_function load_slib
 assert_function clone_pinned
 assert_function fetch_nginx_source
+assert_function modules_selected
+assert_function modules_bundle_url
+assert_function fetch_modules_bundle
+assert_function load_module_versions
 
 # ---------------------------------------------------------------------------
 # Pinned dependencies and checksum helpers.
@@ -134,6 +138,62 @@ standalone_out=$(
   ) 2>/dev/null
 )
 assert_contains "$standalone_out" "DISTRO_GROUP=Debian" "standalone release path verifies the pinned slib"
+
+# ---------------------------------------------------------------------------
+# Module bundle fetch and version loading (file:// fixture, no network).
+# ---------------------------------------------------------------------------
+bundle_root="$WORK/fakebundle"
+mkdir -p "$bundle_root/full/modules/headers-more-nginx-module-0.39"
+printf 'HEADERMOD_VER=0.39\n' > "$bundle_root/full/versions.conf"
+tar -czf "$WORK/nginx-modules-full.tar.gz" -C "$bundle_root" full
+( cd "$WORK" && sha256sum nginx-modules-full.tar.gz > SHA256SUMS )
+
+bundle_result=$(
+  export TEMP_INSTALL_DIR="$WORK/bundle-extract"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export PATH=${PATH#"$WORK/bin:"}
+  export MODULES_BUNDLE_URL="file://$WORK/nginx-modules-full.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/SHA256SUMS"
+  fetch_modules_bundle >/dev/null 2>&1 || exit 1
+  load_module_versions || exit 1
+  printf '%s' "$HEADERMOD_VER"
+)
+assert_eq "0.39" "$bundle_result" "loads module versions from the bundle"
+if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.39" ]]; then
+  pass "extracts the module tree from the bundle"
+else
+  fail "extracts the module tree from the bundle"
+fi
+
+assert_contains "$(modules_bundle_url)" "/tmiland/nginx-modules/releases/latest/download/nginx-modules-full.tar.gz" "defaults to the latest full bundle"
+if (
+  export TEMP_INSTALL_DIR="$WORK/no-bundle"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export MODULES_BUNDLE_URL="file://$WORK/missing.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/missing.sums"
+  fetch_modules_bundle
+) >/dev/null 2>&1; then
+  fail "fails when the bundle is missing"
+else
+  pass "fails when the bundle is missing"
+fi
+
+if ( BROTLI=y; modules_selected ); then
+  pass "detects a selected module"
+else
+  fail "detects a selected module"
+fi
+if ( BROTLI=n; HEADERMOD=n; modules_selected ); then
+  fail "detects no selected modules"
+else
+  pass "detects no selected modules"
+fi
+if grep -q 'ZSTD=y' README.md && ! grep -q 'ZSTF' README.md; then
+  pass "README documents ZSTD, not ZSTF"
+else
+  fail "README documents ZSTD, not ZSTF"
+fi
+
 
 assert_eq "14" "${#MODULE_PINS[@]}" "pins every git-based module"
 for name in brotli cachepurge subfilter modsecurity modsecurity_nginx fancyindex dav_ext vts rtmp testcookie redis2 srcache set_misc quiche; do
@@ -214,6 +274,47 @@ assert_eq "stable" "$(source_get NGINX_VER_NAME)" "the default is the stable cha
 assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selects the mainline channel"
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
 assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
+assert_eq "full" "$(source_get MODULES_PROFILE --profile full)" "--profile sets the built-in profile"
+assert_eq "web" "$(source_get MODULES_BUNDLE --modules-bundle web)" "--modules-bundle sets the bundle"
+assert_eq "v2026.11.2" "$(source_get MODULES_REV --modules-rev v2026.11.2)" "--modules-rev sets the release"
+assert_eq "y" "$(source_get MODULES_EXTRA --modules-extra)" "--modules-extra is parsed"
+assert_eq "minimal" "$(source_get MODULES_PROFILE --modules-extra)" "--modules-extra does not change the profile"
+assert_eq "full" "$(source_get MODULES_PROFILE --modules-extra --profile full)" "--modules-extra composes with --profile"
+if ( source ./nginx_installer.sh --profile balanced >/dev/null 2>&1 ); then
+  fail "rejects an invalid --profile"
+else
+  pass "rejects an invalid --profile"
+fi
+
+profile_modules() {
+  local profile=$1
+  (
+    export MODULES_PROFILE="$profile"
+    unset NGINX_MODULES
+    # shellcheck source=/dev/null
+    source ./nginx_installer.sh >/dev/null
+    printf '%s' "$NGINX_MODULES"
+  )
+}
+assert_contains "$(profile_modules minimal)" "--with-http_ssl_module" "minimal profile keeps TLS"
+assert_contains "$(profile_modules minimal)" "--with-http_v2_module" "minimal profile keeps HTTP/2"
+if [[ $(profile_modules minimal) == *"--with-http_perl_module"* ]]; then
+  fail "minimal profile excludes Perl"
+else
+  pass "minimal profile excludes Perl"
+fi
+if [[ $( (unset MODULES_PROFILE NGINX_MODULES; source ./nginx_installer.sh >/dev/null; printf '%s' "$NGINX_MODULES") ) == *"--with-http_perl_module"* ]]; then
+  fail "the default profile is minimal"
+else
+  pass "the default profile is minimal"
+fi
+assert_contains "$(profile_modules full)" "--with-http_perl_module" "full profile keeps Perl"
+assert_contains "$(profile_modules full)" "--with-stream" "full profile keeps stream"
+if ( MODULES_PROFILE=bogus; source ./nginx_installer.sh >/dev/null 2>&1 ); then
+  fail "rejects an unknown MODULES_PROFILE"
+else
+  pass "rejects an unknown MODULES_PROFILE"
+fi
 
 if ( source ./nginx_installer.sh --nginx 1.30 >/dev/null 2>&1 ); then
   fail "rejects a two-part --nginx version"
@@ -235,6 +336,13 @@ usage_out=$(usage)
 assert_contains "$usage_out" "|-hl" "usage documents -hl for headless"
 assert_contains "$usage_out" "--bad-bot" "usage documents --bad-bot"
 assert_contains "$usage_out" "--detect" "usage documents --detect"
+assert_contains "$usage_out" "--profile" "usage documents --profile"
+assert_contains "$usage_out" "temporary build directory" "usage describes the build directory simply"
+if [[ $usage_out == *"(under /opt"* ]]; then
+  fail "usage omits the build directory allowlist"
+else
+  pass "usage omits the build directory allowlist"
+fi
 
 # ---------------------------------------------------------------------------
 # Distro detection (fixtures, so no container is needed).
