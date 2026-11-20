@@ -351,11 +351,18 @@ fetch_modules_bundle() {
 }
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
-  local dir=${1:-} canonical
+  local dir=${1:-} canonical part
+  local -a parts=()
   [[ -n $dir && $dir == /* ]] || return 1
+  [[ $dir != */ ]] || return 1
+  IFS='/' read -r -a parts <<< "$dir"
+  for part in "${parts[@]}"; do
+    [[ $part != '.' && $part != '..' ]] || return 1
+  done
+  # Resolve symlinked parents (for example /opt -> /home/opt) and validate
+  # the real target, not the spelling of the requested path.
   canonical=$(realpath -m -- "$dir" 2>/dev/null) || return 1
-  [[ $canonical == "$dir" ]] || return 1
-  case "$dir" in
+  case "$canonical" in
     /opt/*|/usr/local/*|/var/tmp/*|/tmp/*|/home/*|/root/*|/srv/*)
       return 0
       ;;
@@ -1426,7 +1433,7 @@ if [[ $DISTRO_GROUP == "Debian" ]]; then
   INSTALL="apt-get -o Dpkg::Progress-Fancy=1 install -qq"
   PKGCHK="dpkg -s"
   # Install packages
-  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev gnupg libzstd-dev"
+  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev gnupg libzstd-dev pkg-config"
 else
   echo -e "${RED}${BALLOT_X} Error: Sorry, your OS is not supported.${NORMAL}"
   exit 1;
@@ -1494,29 +1501,32 @@ install_nginx() {
       # shellcheck disable=SC2086
       ${INSTALL} ${i} >>"${RUN_LOG}" 2>&1
     done
-		if module_selected modsecurity || module_selected modsecurity-nginx; then
-			apt-get install -y apt-utils libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libyajl-dev pkgconf >>"${RUN_LOG}" 2>&1
-		fi
-
-		if module_selected geoip2; then
-			if grep -q "# See /etc/apt/sources.list.d/debian.sources" /etc/apt/sources.list
-			then
-				sources_list=/etc/apt/sources.list.d/debian.sources
-			else
-				sources_list=/etc/apt/sources.list
-			fi
-			if grep -q "main contrib" $sources_list
-			then
-				echo "main contrib already in sources.list... Skipping"
-			else
-				sed -i "s/main/main contrib/g" $sources_list
-			fi
-			apt-get update >>"${RUN_LOG}" 2>&1
-			apt-get install -y geoipupdate >>"${RUN_LOG}" 2>&1
-		fi
-		if module_selected zstd; then
-			apt-get install -y zstd >>"${RUN_LOG}" 2>&1
-		fi
+  fi
+  # Module dependencies are separate from the base package check above; the
+  # base packages may already be installed on a rerun.
+  if module_selected modsecurity || module_selected modsecurity-nginx; then
+    apt-get install -y apt-utils libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libyajl-dev pkg-config >>"${RUN_LOG}" 2>&1 ||
+      fatal "Could not install ModSecurity build dependencies."
+  fi
+  if module_selected geoip2; then
+    if [[ -f /etc/apt/sources.list ]]; then
+      sources_list=/etc/apt/sources.list
+      if ! grep -q "main contrib" "$sources_list"; then
+        sed -i "s/main/main contrib/g" "$sources_list"
+      fi
+    elif [[ -f /etc/apt/sources.list.d/debian.sources ]]; then
+      sources_list=/etc/apt/sources.list.d/debian.sources
+      if ! grep -qE '^Components:.*[[:space:]]contrib([[:space:]]|$)' "$sources_list"; then
+        sed -i '/^Components:/ s/$/ contrib/' "$sources_list"
+      fi
+    fi
+    apt-get update >>"${RUN_LOG}" 2>&1
+    apt-get install -y geoipupdate >>"${RUN_LOG}" 2>&1 ||
+      fatal "Could not install geoipupdate."
+  fi
+  if module_selected zstd; then
+    apt-get install -y zstd >>"${RUN_LOG}" 2>&1 ||
+      fatal "Could not install zstd."
   fi
   log_success "Package Setup Finished"
 
