@@ -1,36 +1,111 @@
 # nginx-installer
- Automatic nginx install script
+
+Automatic nginx install script.
 
 [![GitHub release](https://img.shields.io/github/release/tmiland/nginx-installer.svg?style=for-the-badge)](https://github.com/tmiland/nginx-installer/releases) [![licence](https://img.shields.io/github/license/tmiland/nginx-installer.svg?style=for-the-badge)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE) ![Bash](https://img.shields.io/badge/Language-SH-4EAA25.svg?style=for-the-badge)
 
+## Installation
 
- ## Usage
- ```bash
- Usage:  nginx_installer.sh [options]
-   If called without arguments, installs stable nginx using /opt/nginx
+Run the installer as root. The examples use `sudo`; omit it if you are already root.
 
-   --help                 |-h   display this help and exit
-   --nginx                |-ng  nginx version (X.Y.Z)
-   --stable               |-s   stable nginx version (auto-detected)
-   --mainline             |-m   mainline nginx version (auto-detected)
-   --detect               |-dt  detect the distro and exit
-   --headless             |-hl  headless install
-   --modules              |-M   module ids or bundle names (comma separated)
-   --modules-extra        |-me  preset: append the common extra module ids
-   --profile              |-p   built-in module profile: minimal or full
-   --modules-rev          |-mr  nginx-modules release tag (default: latest)
-   --geoip-account-id     |-ga  MaxMind account id for geoip2
-   --geoip-license-key    |-gk  MaxMind license key for geoip2 (visible in ps)
-   --geoip-env-file       |-ge  file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY
-   --bad-bot              |-bb  install the bad bot blocker
-   --dir                  |-d   temporary build directory
-   --verbose              |-v   increase verbosity
-   --nproc                |-n   set the number of processing units to use
-   --enable-debug-info    |-edi enable debug info
-   --changelog            |-cl  view changelog for nginx version
-   --update               |-upd check for script update
-   --uninstall            |-u   uninstall nginx
- ```
+### Download the latest release
+
+```bash
+curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh -o nginx_installer.sh
+chmod +x nginx_installer.sh
+```
+
+The `main` branch is available for development, but is not the tested release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tmiland/nginx-installer/main/nginx_installer.sh -o nginx_installer.sh
+chmod +x nginx_installer.sh
+```
+
+### Full module mainline install
+
+Full built-in profile, the `all` third-party module set, GeoIP, and the bad bot blocker:
+
+```bash
+sudo ./nginx_installer.sh -m \
+  --profile full \
+  --modules "all" \
+  --geoip-env-file "$HOME"/.credentials/geoip.env \
+  --bad-bot \
+  --dir /opt/nginx
+```
+
+`-m` selects the latest mainline nginx. `all` includes `geoip2`, so the GeoIP credentials file is required. Remove `--bad-bot` if you do not want the blocker.
+
+### Minimal mainline install
+
+The same `all` module set with the smaller built-in profile:
+
+```bash
+sudo ./nginx_installer.sh -m \
+  --profile minimal \
+  --modules "all" \
+  --geoip-env-file "$HOME"/.credentials/geoip.env \
+  --bad-bot \
+  --dir /opt/nginx
+```
+
+The minimal profile builds TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support only. It does not include native HTTP/3; `--profile full` adds that.
+
+For nginx only, with no third-party modules:
+
+```bash
+sudo ./nginx_installer.sh -m --profile minimal
+```
+
+### Stable defaults
+
+With no arguments, the installer builds the latest stable nginx with the minimal built-in profile and no third-party modules:
+
+```bash
+sudo ./nginx_installer.sh
+```
+
+### Install the script system-wide (optional)
+
+```bash
+sudo mkdir -p /opt/nginx-installer
+sudo curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh -o /opt/nginx-installer/nginx-installer.sh
+sudo chmod +x /opt/nginx-installer/nginx-installer.sh
+sudo ln -sf /opt/nginx-installer/nginx-installer.sh /usr/local/bin/nginx-installer
+sudo nginx-installer
+```
+
+## Usage
+
+```bash
+Usage: nginx_installer.sh [options]
+  If called without arguments, installs stable nginx using /opt/nginx
+
+  --help                 |-h   display this help and exit
+  --nginx                |-ng  nginx version (X.Y.Z)
+  --stable               |-s   stable nginx version (auto-detected)
+  --mainline             |-m   mainline nginx version (auto-detected)
+  --detect               |-dt  detect the distro and exit
+  --headless             |-hl  headless install
+  --modules              |-M   module ids or bundle names (comma separated)
+  --modules-extra        |-me  preset: append the common extra module ids
+  --profile              |-p   built-in module profile: minimal or full
+  --modules-rev          |-mr  nginx-modules release tag (default: latest)
+  --geoip-account-id     |-ga  MaxMind account id for geoip2
+  --geoip-license-key    |-gk  MaxMind license key for geoip2 (visible in ps)
+  --geoip-env-file       |-ge  file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY
+  --bad-bot              |-bb  install the bad bot blocker
+  --dir                  |-d   temporary build directory
+  --verbose              |-v   increase verbosity
+  --nproc                |-n   set the number of processing units to use
+  --enable-debug-info    |-edi enable debug info
+  --changelog            |-cl  view changelog for nginx version
+  --update               |-upd check for script update
+  --uninstall            |-u   uninstall nginx
+```
+
+`--headless` sets the `SSL=1`, `RM_CONF=n`, and `RM_LOGS=n` defaults. It does not select modules or make the installer fully non-interactive.
 
 ### Built-in module profile
 
@@ -59,113 +134,46 @@ GEOIP2_LICENSE_KEY=...
 ```
 
 ```bash
-MODULES="geoip2" \
-GEOIP_ENV_FILE="$HOME/.credentials/geoip.env" \
-./nginx_installer.sh
-# or: ./nginx_installer.sh --modules geoip2 --geoip-env-file "$HOME/.credentials/geoip.env"
+./nginx_installer.sh --modules geoip2 --geoip-env-file "$HOME/.credentials/geoip.env"
+# or: GEOIP_ENV_FILE="$HOME/.credentials/geoip.env" MODULES=geoip2 ./nginx_installer.sh
 ```
 
 If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoip.env` automatically. Under `sudo` it checks the invoking user's home first (`$SUDO_USER`), then root's, so a file in your own home works without `-ge`.
 
 `--geoip-account-id` and `--geoip-license-key` also exist, but a key passed in argv is visible in `ps`; prefer the env file or environment variables. The file is parsed, not sourced: only the two keys above are accepted.
 
-### Example
+## Requirements
 
- ```bash
- HEADLESS=y \
- MODULES="headers-more,fancyindex,cachepurge,subfilter,lua-nginx,lua-resty-core,lua-resty-lrucache,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd" \
- BADBOT=y \
- ./nginx_installer.sh 2>&1 | tee nginx-installer.log
- ```
- 
- ### Installation
+- Debian 9 or later, and Debian-family distributions including Ubuntu.
+- Root access.
+- Network access to nginx.org, GitHub, and the module sources.
 
-If root password is not set, type:
+CI builds and uninstalls nginx on Debian 12/13 and Ubuntu 22.04/24.04; Linux Mint 21.3 and LMDE 7 are checked for distro detection.
 
-```bash
-sudo passwd root
-```
-Log in as root
-```bash
-su root
-```
-- Latest release
-  ```bash
-  curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh > nginx_installer.sh && \
-  chmod +x nginx_installer.sh && \
-  ./nginx_installer.sh
-  ```
-- Master
-  ```bash
-  curl -fsSL https://github.com/tmiland/nginx-installer/raw/refs/heads/main/nginx_installer.sh > nginx_installer.sh && \
-  chmod +x nginx_installer.sh && \
-  ./nginx_installer.sh
-  ```
+nginx source tarballs are PGP-verified against the pinned nginx.org signing keys. `src/slib.sh` and all third-party modules are pinned and checksum-verified.
 
-To install this script:
-  - Latest release
-    ```bash
-    mkdir -p /opt/nginx-installer && \
-      curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh > /opt/nginx-installer/nginx-installer.sh && \
-      chmod +x /opt/nginx-installer/nginx-installer.sh && \
-      ln -s /opt/nginx-installer/nginx-installer.sh /usr/local/bin/nginx-installer && \
-      nginx-installer
-    ```
-  - Master
-    ```bash
-    mkdir -p /opt/nginx-installer && \
-      curl -fsSL https://github.com/tmiland/nginx-installer/raw/refs/heads/main/nginx_installer.sh > /opt/nginx-installer/nginx-installer.sh && \
-      chmod +x /opt/nginx-installer/nginx-installer.sh && \
-      ln -s /opt/nginx-installer/nginx-installer.sh /usr/local/bin/nginx-installer && \
-      nginx-installer
-    ```
-
-  ## Compatibility and Requirements
-
-  - Debian 9 and later
-
-  CI builds and uninstalls nginx on Debian 12/13 and Ubuntu 22.04/24.04; Mint 21.3 and LMDE 7 are checked for distro detection.
-
-  nginx source tarballs are PGP-verified against the pinned nginx.org signing keys; `src/slib.sh` and third-party modules are pinned and checksum-verified.
-
-#### Compile options With headless
-
-The examples below use `MODULES_PROFILE=full`; the default minimal build includes only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support.
+## Verifying the build
 
 ```bash
 nginx -V
-nginx version: nginx/1.28.0
-built with Nginx Installer @tmiland
-built by gcc 12.2.0 (Debian 12.2.0-14+deb12u1) 
-built with OpenSSL 3.0.16 11 Feb 2025
-TLS SNI support enabled
-configure arguments: --sbin-path=/usr/sbin/nginx --conf-path=/etc/nginx/nginx.conf --error-log-path=/var/log/nginx/error.log --http-log-path=/var/log/nginx/access.log --pid-path=/var/run/nginx.pid --lock-path=/var/run/nginx.lock --http-client-body-temp-path=/var/cache/nginx/client_temp --http-proxy-temp-path=/var/cache/nginx/proxy_temp --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp --user=nginx --group=nginx --with-cc-opt=-Wno-deprecated-declarations --with-cc-opt=-Wno-ignored-qualifiers --with-select_module --with-poll_module --with-threads --with-file-aio --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module --with-mail --with-mail_ssl_module --without-mail_pop3_module --without-mail_imap_module --without-mail_smtp_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_ssl_preread_module --with-cpp_test_module --with-compat --with-pcre --with-pcre-jit
 ```
 
-#### Compile options With extra modules option
-```bash
-nginx -V
-nginx version: nginx/1.28.0
-built with Nginx Installer @tmiland
-built by gcc 12.2.0 (Debian 12.2.0-14+deb12u1) 
-built with OpenSSL 3.5.1 1 Jul 2025
-TLS SNI support enabled
-configure arguments: --sbin-path=/usr/sbin/nginx --conf-path=/etc/nginx/nginx.conf --error-log-path=/var/log/nginx/error.log --http-log-path=/var/log/nginx/access.log --pid-path=/var/run/nginx.pid --lock-path=/var/run/nginx.lock --http-client-body-temp-path=/var/cache/nginx/client_temp --http-proxy-temp-path=/var/cache/nginx/proxy_temp --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp --user=nginx --group=nginx --with-cc-opt=-Wno-deprecated-declarations --with-cc-opt=-Wno-ignored-qualifiers --with-select_module --with-poll_module --with-threads --with-file-aio --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module --with-mail --with-mail_ssl_module --without-mail_pop3_module --without-mail_imap_module --without-mail_smtp_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_ssl_preread_module --with-cpp_test_module --with-compat --with-pcre --with-pcre-jit --add-module=/opt/nginx/modules/headers-more-nginx-module-0.39 --with-openssl=/opt/nginx/modules/openssl-3.5.1 --add-module=/opt/nginx/modules/ngx_cache_purge --add-module=/opt/nginx/modules/ngx_http_substitutions_filter_module --add-module=/opt/nginx/modules/fancyindex --with-http_dav_module --add-module=/opt/nginx/modules/nginx-dav-ext-module --add-module=/opt/nginx/modules/nginx-module-vts --add-module=/opt/nginx/modules/nginx-rtmp-module --add-module=/opt/nginx/modules/testcookie-nginx-module --add-module=/opt/nginx/modules/redis2-nginx-module --add-module=/opt/nginx/modules/srcache-nginx-module --add-module=/opt/nginx/modules/ngx_devel_kit-0.3.4 --add-module=/opt/nginx/modules/set-misc-nginx-module --add-module=/opt/nginx/modules/echo-nginx-module-0.63
-  ```
+The configure arguments show the selected profile and every `--add-module`. The module list is the authoritative record of what was compiled.
 
 ## Credits
-- Code is mixed and customized from these sources
-  - [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall)
 
-  ## Donations
-  <a href="https://coindrop.to/tmiland" target="_blank"><img src="https://coindrop.to/embed-button.png" style="border-radius: 10px; height: 57px !important;width: 229px !important;" alt="Coindrop.to me"></img></a>
+- Code is mixed and customized from [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall).
 
-  #### Disclaimer 
+## Donations
 
-  *** ***Use at own risk*** ***
+<a href="https://coindrop.to/tmiland" target="_blank"><img src="https://coindrop.to/embed-button.png" style="border-radius: 10px; height: 57px !important;width: 229px !important;" alt="Coindrop.to me"></img></a>
 
-  ### License
+## Disclaimer
 
-  [![MIT License Image](https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/MIT_logo.svg/220px-MIT_logo.svg.png)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
+***Use at own risk.***
 
-  [MIT License](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
+## License
+
+[![MIT License Image](https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/MIT_logo.svg/220px-MIT_logo.svg.png)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
+
+[MIT License](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
