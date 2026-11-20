@@ -274,6 +274,17 @@ assert_eq "stable" "$(source_get NGINX_VER_NAME)" "the default is the stable cha
 assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selects the mainline channel"
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
 assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
+assert_eq "full" "$(source_get MODULES_PROFILE --profile full)" "--profile sets the built-in profile"
+assert_eq "web" "$(source_get MODULES_BUNDLE --modules-bundle web)" "--modules-bundle sets the bundle"
+assert_eq "v2026.11.2" "$(source_get MODULES_REV --modules-rev v2026.11.2)" "--modules-rev sets the release"
+assert_eq "y" "$(source_get MODULES_EXTRA --modules-extra)" "--modules-extra is parsed"
+assert_eq "minimal" "$(source_get MODULES_PROFILE --modules-extra)" "--modules-extra does not change the profile"
+assert_eq "full" "$(source_get MODULES_PROFILE --modules-extra --profile full)" "--modules-extra composes with --profile"
+if ( source ./nginx_installer.sh --profile balanced >/dev/null 2>&1 ); then
+  fail "rejects an invalid --profile"
+else
+  pass "rejects an invalid --profile"
+fi
 
 profile_modules() {
   local profile=$1
@@ -325,6 +336,13 @@ usage_out=$(usage)
 assert_contains "$usage_out" "|-hl" "usage documents -hl for headless"
 assert_contains "$usage_out" "--bad-bot" "usage documents --bad-bot"
 assert_contains "$usage_out" "--detect" "usage documents --detect"
+assert_contains "$usage_out" "--profile" "usage documents --profile"
+assert_contains "$usage_out" "temporary build directory" "usage describes the build directory simply"
+if [[ $usage_out == *"(under /opt"* ]]; then
+  fail "usage omits the build directory allowlist"
+else
+  pass "usage omits the build directory allowlist"
+fi
 
 # ---------------------------------------------------------------------------
 # Distro detection (fixtures, so no container is needed).

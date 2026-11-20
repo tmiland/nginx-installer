@@ -17,6 +17,9 @@
    --detect               |-dt  detect the distro and exit
    --headless             |-hl  headless install
    --modules-extra        |-me  extra modules
+   --profile              |-p   built-in module profile: minimal or full
+   --modules-bundle       |-mb  module source bundle (default: full)
+   --modules-rev          |-mr  nginx-modules release tag (default: latest)
    --bad-bot              |-bb  install the bad bot blocker
    --dir                  |-d   temporary build directory
    --verbose              |-v   increase verbosity

@@ -711,8 +711,11 @@ usage() {
   printf "%s\\n" "  ${YELLOW}--detect               |-dt${NORMAL}  detect the distro and exit"
 	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  extra modules"
+	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
+	printf "%s\\n" "  ${YELLOW}--modules-bundle       |-mb${NORMAL}  module source bundle (default: full)"
+	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
 	printf "%s\\n" "  ${YELLOW}--bad-bot              |-bb${NORMAL}  install the bad bot blocker"
-  printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory (under /opt, /usr/local, /var/tmp, /tmp, /home, /root, or /srv)"
+  printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory"
   printf "%s\\n" "  ${YELLOW}--verbose              |-v${NORMAL}   increase verbosity"
   printf "%s\\n" "  ${YELLOW}--nproc                |-n${NORMAL}   set the number of processing units to use"
   printf "%s\\n" "  ${YELLOW}--enable-debug-info    |-edi${NORMAL} enable debug info"
@@ -766,6 +769,24 @@ while [[ $# -gt 0 ]]; do
 		--modules-extra | -me)
 			shift
 			MODULES_EXTRA=y
+			;;
+		--profile | -p)
+			case "${2:-}" in
+				minimal | full) ;;
+				*) fatal "Option --profile requires 'minimal' or 'full'." ;;
+			esac
+			MODULES_PROFILE=$2
+			shift 2
+			;;
+		--modules-bundle | -mb)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules-bundle requires a bundle name."
+			MODULES_BUNDLE=$2
+			shift 2
+			;;
+		--modules-rev | -mr)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules-rev requires a release tag."
+			MODULES_REV=$2
+			shift 2
 			;;
 		--bad-bot | -bb)
 			shift
