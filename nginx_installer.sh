@@ -739,9 +739,9 @@ usage() {
 	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
 	printf "%s\\n" "  ${YELLOW}--modules-bundle       |-mb${NORMAL}  module source bundle (default: full)"
 	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
-	printf "%s\\n" "  ${YELLOW}--geoip-account-id     ${NORMAL}      MaxMind account id for geoip2"
-	printf "%s\\n" "  ${YELLOW}--geoip-license-key    ${NORMAL}      MaxMind license key for geoip2 (visible in ps)"
-	printf "%s\\n" "  ${YELLOW}--geoip-env-file       ${NORMAL}      file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY"
+	printf "%s\\n" "  ${YELLOW}--geoip-account-id     |-ga${NORMAL}      MaxMind account id for geoip2"
+	printf "%s\\n" "  ${YELLOW}--geoip-license-key    |-gk${NORMAL}      MaxMind license key for geoip2 (visible in ps)"
+	printf "%s\\n" "  ${YELLOW}--geoip-env-file       |-ge${NORMAL}      file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY"
 	printf "%s\\n" "  ${YELLOW}--bad-bot              |-bb${NORMAL}  install the bad bot blocker"
   printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory"
   printf "%s\\n" "  ${YELLOW}--verbose              |-v${NORMAL}   increase verbosity"
@@ -803,17 +803,17 @@ while [[ $# -gt 0 ]]; do
 			shift
 			MODULES_EXTRA=y
 			;;
-		--geoip-account-id)
+		--geoip-account-id | -ga)
 			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --geoip-account-id requires a value."
 			GEOIP2_ACCOUNT_ID=$2
 			shift 2
 			;;
-		--geoip-license-key)
+		--geoip-license-key | -gk)
 			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --geoip-license-key requires a value."
 			GEOIP2_LICENSE_KEY=$2
 			shift 2
 			;;
-		--geoip-env-file)
+		--geoip-env-file | -ge)
 			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --geoip-env-file requires a path."
 			GEOIP_ENV_FILE=$2
 			shift 2
