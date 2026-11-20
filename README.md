@@ -5,6 +5,7 @@
 Build nginx from source with verified modules, selectable profiles, and GeoIP support.
 
 [![Latest release](https://img.shields.io/github/v/release/tmiland/nginx-installer?style=for-the-badge)](https://github.com/tmiland/nginx-installer/releases)
+[![License](https://img.shields.io/github/license/tmiland/nginx-installer?style=for-the-badge)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
 [![Bash](https://img.shields.io/badge/language-bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)](https://github.com/tmiland/nginx-installer)
 [![Tests](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml)
 [![Install matrix](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml/badge.svg?branch=main)](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml)
@@ -233,5 +234,7 @@ The configure arguments show the selected profile and every `--add-module`. That
 ***Use at own risk.***
 
 ## License
+
+[![MIT License Image](https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/MIT_logo.svg/220px-MIT_logo.svg.png)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
 
 [MIT License](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
