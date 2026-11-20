@@ -20,7 +20,7 @@ Debian 9 and later is the intended range; the current CI matrix covers Debian 12
 The installer follows nginx.org's stable and mainline channels. `--stable` and `--mainline` resolve the current version; `--nginx X.Y.Z` pins an exact version.
 
 - Stable 1.30.7 is covered by the install CI.
-- Mainline 1.31.9 was verified with the full module set.
+- Mainline 1.31.9 was manually verified with the full module set.
 
 ## Requirements
 

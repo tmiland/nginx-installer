@@ -142,7 +142,7 @@ The installer never installs a distribution nginx package. It verifies the nginx
 | Ubuntu 22.04 / 24.04 | build + uninstall |
 | Linux Mint 21.3 / LMDE 7 | detection |
 
-Debian 9+ is the intended range; Debian 12/13 are the current CI baseline. Stable 1.30.7 is covered by CI; mainline 1.31.9 was verified with the full module set.
+Debian 9+ is the intended range; Debian 12/13 are the current CI baseline. Stable 1.30.7 is covered by CI; mainline 1.31.9 was manually verified with the full module set.
 
 [Full compatibility matrix and verification details →](docs/compatibility.md)
 
