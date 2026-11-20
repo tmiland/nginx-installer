@@ -181,7 +181,7 @@ jobs:
       SETMISC: "y"
       LUA: "y"
       NGXECHO: "y"
-      ZSTF: "y"
+      ZSTD: "y"
     steps:
       - name: Install container prerequisites
         run: |

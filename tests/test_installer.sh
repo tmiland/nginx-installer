@@ -188,7 +188,11 @@ if ( BROTLI=n; HEADERMOD=n; modules_selected ); then
 else
   pass "detects no selected modules"
 fi
-assert_eq "y" "$( ( ZSTF=y; source ./nginx_installer.sh >/dev/null; printf '%s' "${ZSTD:-}" ) )" "accepts ZSTF as a ZSTD alias"
+if grep -q 'ZSTD=y' README.md && ! grep -q 'ZSTF' README.md; then
+  pass "README documents ZSTD, not ZSTF"
+else
+  fail "README documents ZSTD, not ZSTF"
+fi
 
 
 assert_eq "14" "${#MODULE_PINS[@]}" "pins every git-based module"

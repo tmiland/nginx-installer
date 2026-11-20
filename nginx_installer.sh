@@ -65,10 +65,6 @@ BANNERS=1
 TEMP_INSTALL_DIR=${TEMP_INSTALL_DIR:-/opt/nginx}
 # Default install dir
 INSTALL_DIR=${INSTALL_DIR:-/etc/nginx}
-# Accept the documented ZSTF alias for the zstd module.
-if [[ ${ZSTF:-n} == y ]]; then
-  ZSTD=y
-fi
 # https://stackoverflow.com/a/51068988
 # latest_kernel() {
 #   curl -s https://www.kernel.org/finger_banner | grep -m1 "$1" | sed -r 's/^.+: +([^ ]+)( .+)?$/\1/'

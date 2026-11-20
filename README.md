@@ -59,7 +59,7 @@ Module sources come from a verified full bundle in [`tmiland/nginx-modules`](htt
  SRCACHE=y \
  SETMISC=y \
  NGXECHO=y \
- ZSTF=y \
+ ZSTD=y \
  BADBOT=y \
  ./nginx_installer.sh 2>&1 | tee nginx-installer.log
  ```
