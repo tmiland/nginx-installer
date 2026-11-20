@@ -1589,12 +1589,21 @@ EOF
 			log_success "Installation finished"
 			# remove debugging symbols
 			strip -s /usr/sbin/nginx
-			if [[ -d $INSTALL_DIR/conf.d ]] && module_resolved lua-nginx; then
-				# add necessary `lua_package_path` directive to `nginx.conf`, in the http context
-				tee $INSTALL_DIR/conf.d/lua_package_path.conf <<EOF >>"${RUN_LOG}" 2>&1
+			if [[ -d $INSTALL_DIR/conf.d ]]; then
+				if module_resolved lua-nginx; then
+					# add necessary `lua_package_path` directive to `nginx.conf`, in the http context
+					tee "$INSTALL_DIR/conf.d/lua_package_path.conf" <<EOF >>"${RUN_LOG}" 2>&1
 lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";
 EOF
-				# echo -e 'lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";' > $INSTALL_DIR/conf.d/lua_package_path.conf >>"${RUN_LOG}" 2>&1
+				elif [[ -f $INSTALL_DIR/conf.d/lua_package_path.conf ]]; then
+					lua_conf_expected="lua_package_path \"$INSTALL_DIR/lib/lua/?.lua;;\";"
+					if [[ "$(cat "$INSTALL_DIR/conf.d/lua_package_path.conf")" == "$lua_conf_expected" ]]; then
+						rm -f "$INSTALL_DIR/conf.d/lua_package_path.conf"
+						log_info "Removed stale lua_package_path.conf (lua-nginx is not selected)"
+					else
+						log_warning "Keeping modified $INSTALL_DIR/conf.d/lua_package_path.conf; lua-nginx is not selected and nginx -t may fail."
+					fi
+				fi
 			fi
 			NGINX_BUILT_VER=$(nginx_source_version ./src/core/nginx.h) ||
 			  fatal "Could not read NGINX_VERSION from ./src/core/nginx.h"
