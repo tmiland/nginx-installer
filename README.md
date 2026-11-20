@@ -174,6 +174,4 @@ The configure arguments show the selected profile and every `--add-module`. The 
 
 ## License
 
-[![MIT License Image](https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/MIT_logo.svg/220px-MIT_logo.svg.png)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
-
 [MIT License](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
