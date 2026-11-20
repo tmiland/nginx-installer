@@ -351,11 +351,18 @@ fetch_modules_bundle() {
 }
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
-  local dir=${1:-} canonical
+  local dir=${1:-} canonical part
+  local -a parts=()
   [[ -n $dir && $dir == /* ]] || return 1
+  [[ $dir != */ ]] || return 1
+  IFS='/' read -r -a parts <<< "$dir"
+  for part in "${parts[@]}"; do
+    [[ $part != '.' && $part != '..' ]] || return 1
+  done
+  # Resolve symlinked parents (for example /opt -> /home/opt) and validate
+  # the real target, not the spelling of the requested path.
   canonical=$(realpath -m -- "$dir" 2>/dev/null) || return 1
-  [[ $canonical == "$dir" ]] || return 1
-  case "$dir" in
+  case "$canonical" in
     /opt/*|/usr/local/*|/var/tmp/*|/tmp/*|/home/*|/root/*|/srv/*)
       return 0
       ;;

@@ -696,6 +696,15 @@ else
   fail "does not remove the symlink it refused"
 fi
 
+mkdir -p "$WORK/real-parent"
+ln -s "$WORK/real-parent" "$WORK/parent-link"
+assert_ok "accepts a build directory under a symlinked parent" \
+  validate_build_dir "$WORK/parent-link/build"
+assert_not_ok "rejects dot-dot under a symlinked parent" \
+  validate_build_dir "$WORK/parent-link/build/.."
+assert_ok "creates a build directory through a symlinked parent" \
+  prepare_build_dir "$WORK/parent-link/build"
+
 # ---------------------------------------------------------------------------
 # Source version parsing (anchored, not line-number based).
 # ---------------------------------------------------------------------------
