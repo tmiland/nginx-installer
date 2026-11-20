@@ -195,6 +195,7 @@ module_resolved() {
 # Parse the bundle's modules.conf into id -> fields tables. The file is data,
 # not shell: id|dir|kind|build|requires|env.
 declare -A MODULE_DIR=() MODULE_KIND=() MODULE_BUILD=() MODULE_REQUIRES=() MODULE_ENV=()
+declare -A BUNDLE_MODULES=()
 declare -a RESOLVED_MODULES=()
 declare -A RESOLVED_SEEN=() RESOLVING=()
 load_modules_manifest() {
@@ -219,6 +220,21 @@ load_modules_manifest() {
     MODULE_ENV[$id]=$env
   done < "$conf"
   ((${#MODULE_DIR[@]} > 0))
+}
+# Parse the optional bundles.conf (bundle|comma-separated module ids). Older
+# bundles may not have it; bundle names are simply unavailable then.
+load_bundles_manifest() {
+  local conf=$TEMP_INSTALL_DIR/bundles.conf line id modules
+  BUNDLE_MODULES=()
+  [[ -f $conf ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ -z $line || $line == \#* ]] && continue
+    IFS='|' read -r id modules <<< "$line"
+    [[ $id =~ ^[a-z0-9][a-z0-9-]*$ && -n $modules ]] || return 1
+    BUNDLE_MODULES[$id]=$modules
+  done < "$conf"
+  return 0
 }
 # Resolve ids and their recursive requires into RESOLVED_MODULES, dependencies
 # first. Unknown ids are rejected; a dependency cycle is a manifest error.
@@ -248,14 +264,24 @@ resolve_module_id() {
   log_debug "Selected module id=$id (kind=${MODULE_KIND[$id]}, env=${MODULE_ENV[$id]:-none})"
 }
 resolve_modules() {
-  local id
+  local token member
+  local -a members=()
   RESOLVED_MODULES=()
   RESOLVED_SEEN=()
   RESOLVING=()
   ((${#MODULE_DIR[@]} > 0)) || { log_error "Module manifest is not loaded."; return 1; }
-  for id in "$@"; do
-    [[ -n $id ]] || continue
-    resolve_module_id "$id" "" || return 1
+  for token in "$@"; do
+    [[ -n $token ]] || continue
+    if [[ -n ${BUNDLE_MODULES[$token]:-} ]]; then
+      IFS=',' read -r -a members <<< "${BUNDLE_MODULES[$token]}"
+      for member in "${members[@]}"; do
+        member=${member//[[:space:]]/}
+        [[ -n $member ]] || continue
+        resolve_module_id "$member" "$token" || return 1
+      done
+    else
+      resolve_module_id "$token" "" || return 1
+    fi
   done
 }
 # Build the configure arguments for a module from its manifest build field.
@@ -273,6 +299,7 @@ append_module_build_args() {
     args=$(module_build_args "$id") || return 1
     [[ -n $args ]] && NGINX_MODULES="$NGINX_MODULES $args"
   done
+  return 0
 }
 # Resolve the release asset for the selected module bundle.
 modules_bundle_url() {
@@ -281,13 +308,13 @@ modules_bundle_url() {
     printf '%s' "$MODULES_BUNDLE_URL"
     return 0
   fi
-  [[ -n $MODULES_REPO && -n $MODULES_BUNDLE ]] || return 1
+  [[ -n $MODULES_REPO ]] || return 1
   if [[ $MODULES_REV == latest ]]; then
     base="https://github.com/$MODULES_REPO/releases/latest/download"
   else
     base="https://github.com/$MODULES_REPO/releases/download/$MODULES_REV"
   fi
-  printf '%s/nginx-modules-%s.tar.gz' "$base" "$MODULES_BUNDLE"
+  printf '%s/nginx-modules-full.tar.gz' "$base"
 }
 # Download and verify the full module source bundle, then extract its module
 # tree and manifest into $TEMP_INSTALL_DIR. The bundle is the only module
@@ -297,18 +324,18 @@ fetch_modules_bundle() {
   url=$(modules_bundle_url) || return 1
   sums=${MODULES_SUMS_URL:-$(dirname -- "$url")/SHA256SUMS}
   tmp=$(mktemp -d "$TEMP_INSTALL_DIR/modules-download.XXXXXX") || return 1
-  archive=$tmp/nginx-modules-${MODULES_BUNDLE}.tar.gz
+  archive=$tmp/nginx-modules-full.tar.gz
   curl -fsSL "$url" -o "$archive" || { rm -rf "$tmp"; return 1; }
   curl -fsSL "$sums" -o "$tmp/SHA256SUMS" || { rm -rf "$tmp"; return 1; }
-  ( cd "$tmp" && grep -E "[ *]nginx-modules-${MODULES_BUNDLE}\.tar\.gz$" SHA256SUMS | sha256sum -c - ) ||
+  ( cd "$tmp" && grep -E '[ *]nginx-modules-full\.tar\.gz$' SHA256SUMS | sha256sum -c - ) ||
     { rm -rf "$tmp"; return 1; }
   extract=$tmp/extract
   mkdir -p "$extract" || { rm -rf "$tmp"; return 1; }
   tar -xzf "$archive" -C "$extract" --no-same-owner || { rm -rf "$tmp"; return 1; }
   if [[ -d $extract/modules ]]; then
     src=$extract
-  elif [[ -d $extract/$MODULES_BUNDLE/modules ]]; then
-    src=$extract/$MODULES_BUNDLE
+  elif [[ -d $extract/full/modules ]]; then
+    src=$extract/full
   else
     src=$(dirname -- "$(find "$extract" -maxdepth 2 -type d -name modules -print -quit)") || true
   fi
@@ -316,8 +343,11 @@ fetch_modules_bundle() {
   mkdir -p "$TEMP_INSTALL_DIR/modules" || { rm -rf "$tmp"; return 1; }
   cp -a "$src/modules/." "$TEMP_INSTALL_DIR/modules/" || { rm -rf "$tmp"; return 1; }
   cp -a "$src/modules.conf" "$TEMP_INSTALL_DIR/modules.conf" || { rm -rf "$tmp"; return 1; }
+  if [[ -f $src/bundles.conf ]]; then
+    cp -a "$src/bundles.conf" "$TEMP_INSTALL_DIR/bundles.conf" || { rm -rf "$tmp"; return 1; }
+  fi
   rm -rf "$tmp"
-  log_info "Verified nginx-modules ${MODULES_BUNDLE} bundle (${MODULES_REV})"
+  log_info "Verified nginx-modules full bundle (${MODULES_REV})"
 }
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
@@ -458,7 +488,6 @@ SLIB_URL=${SLIB_URL:-https://raw.githubusercontent.com/$REPO_NAME/$SLIB_REV/src/
 # build flags and special build steps for the ids in MODULES.
 MODULES_REPO=${MODULES_REPO:-tmiland/nginx-modules}
 MODULES_REV=${MODULES_REV:-latest}
-MODULES_BUNDLE=${MODULES_BUNDLE:-full}
 MODULES_BUNDLE_URL=${MODULES_BUNDLE_URL:-}
 MODULES_SUMS_URL=${MODULES_SUMS_URL:-}
 
@@ -734,10 +763,9 @@ usage() {
   printf "%s\\n" "  ${YELLOW}--mainline             |-m${NORMAL}   mainline nginx version ${YELLOW}$MAINLINE_VER${NORMAL}"
   printf "%s\\n" "  ${YELLOW}--detect               |-dt${NORMAL}  detect the distro and exit"
 	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
-	printf "%s\\n" "  ${YELLOW}--modules              |-M${NORMAL}   module ids to build from the bundle (comma separated)"
+	printf "%s\\n" "  ${YELLOW}--modules              |-M${NORMAL}   module ids or bundle names (comma separated)"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  preset: append the common extra module ids"
 	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
-	printf "%s\\n" "  ${YELLOW}--modules-bundle       |-mb${NORMAL}  module source bundle (default: full)"
 	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
 	printf "%s\\n" "  ${YELLOW}--geoip-account-id     |-ga${NORMAL}      MaxMind account id for geoip2"
 	printf "%s\\n" "  ${YELLOW}--geoip-license-key    |-gk${NORMAL}      MaxMind license key for geoip2 (visible in ps)"
@@ -824,11 +852,6 @@ while [[ $# -gt 0 ]]; do
 				*) fatal "Option --profile requires 'minimal' or 'full'." ;;
 			esac
 			MODULES_PROFILE=$2
-			shift 2
-			;;
-		--modules-bundle | -mb)
-			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules-bundle requires a bundle name."
-			MODULES_BUNDLE=$2
 			shift 2
 			;;
 		--modules-rev | -mr)
@@ -998,13 +1021,31 @@ load_geoip_env_file() {
 	done < "$file"
 }
 
+# Resolve the default credentials file. Under sudo, HOME is the target
+# account's home, so prefer the invoking user's home before $HOME.
+geoip_default_env_file() {
+	local candidate sudo_home=
+	if [[ -n ${SUDO_USER:-} ]] && command -v getent >/dev/null 2>&1; then
+		sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+	fi
+	for candidate in "${sudo_home:+$sudo_home/.credentials/geoip.env}" \
+		"${HOME:-/root}/.credentials/geoip.env"; do
+		if [[ -n $candidate && -f $candidate ]]; then
+			printf '%s' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
 # geoip2 needs a MaxMind license key. Prefer the env file over the environment
 # so the key does not appear in the process list. Never log the value.
 prepare_geoip_credentials() {
-	if [[ -z $GEOIP_ENV_FILE && -f ${HOME:-/root}/.credentials/geoip.env ]]; then
-		GEOIP_ENV_FILE=${HOME:-/root}/.credentials/geoip.env
+	if [[ -z $GEOIP_ENV_FILE ]]; then
+		GEOIP_ENV_FILE=$(geoip_default_env_file) || GEOIP_ENV_FILE=
 	fi
 	if [[ -n $GEOIP_ENV_FILE ]]; then
+		log_info "Using GeoIP credentials file: $GEOIP_ENV_FILE"
 		load_geoip_env_file "$GEOIP_ENV_FILE" || return 1
 	fi
 	if [[ -z $GEOIP2_LICENSE_KEY ]]; then
@@ -1196,8 +1237,29 @@ run_module_handler() {
 	esac
 }
 
-# Apply the patch modules to the nginx source tree. The fixed order preserves
-# the historical stack: TLS resize, quiche, HTTP/3, then HPACK.
+# `make install` on a clean system writes the stock nginx.conf, which has no
+# conf.d include. Distributions usually ship one, but the installer writes its
+# lua_package_path there, so add the include when it is missing.
+ensure_nginx_confd_include() {
+	local conf=$INSTALL_DIR/nginx.conf inc
+	[[ -f $conf ]] || return 0
+	inc="include $INSTALL_DIR/conf.d/*.conf;"
+	grep -Fq "$inc" "$conf" && return 0
+	awk -v inc="    $inc" '
+		{ line[NR] = $0; if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) last = NR }
+		END {
+			if (!last) exit 1
+			for (i = 1; i <= NR; i++) {
+				if (i == last) print inc
+				print line[i]
+			}
+		}
+	' "$conf" > "${conf}.tmp" || { rm -f "${conf}.tmp"; return 1; }
+	chmod --reference="$conf" "${conf}.tmp" 2>/dev/null || true
+	mv "${conf}.tmp" "$conf"
+}
+
+
 apply_module_patches() {
 	local src=$TEMP_INSTALL_DIR/nginx-$NGINX_VER file
 	if ! module_resolved tlsdyn && ! module_resolved quiche &&
@@ -1244,6 +1306,7 @@ download_modules() {
 
 	fetch_modules_bundle || { log_error "Could not download or verify the nginx-modules bundle (${MODULES_REV})."; return 1; }
 	load_modules_manifest || { log_error "Invalid or missing modules.conf in the nginx-modules bundle."; return 1; }
+	load_bundles_manifest || { log_error "Invalid bundles.conf in the nginx-modules bundle."; return 1; }
 	resolve_modules "${MODULE_ROOTS[@]}" || return 1
 
 	if module_resolved geoip2; then
@@ -1383,7 +1446,8 @@ NGINX_OPTIONS=${NGINX_OPTIONS:-"
 --user=nginx \
 --group=nginx \
 --with-cc-opt=-Wno-deprecated-declarations \
---with-cc-opt=-Wno-ignored-qualifiers"}
+--with-cc-opt=-Wno-ignored-qualifiers \
+--with-cc-opt=-Wno-error=vla-parameter"}
 
 configure() {
   ./configure $NGINX_OPTIONS $NGINX_MODULES
@@ -1591,6 +1655,8 @@ EOF
 			strip -s /usr/sbin/nginx
 			if [[ -d $INSTALL_DIR/conf.d ]]; then
 				if module_resolved lua-nginx; then
+					ensure_nginx_confd_include ||
+						fatal "Could not add the conf.d include to $INSTALL_DIR/nginx.conf."
 					# add necessary `lua_package_path` directive to `nginx.conf`, in the http context
 					tee "$INSTALL_DIR/conf.d/lua_package_path.conf" <<EOF >>"${RUN_LOG}" 2>&1
 lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";

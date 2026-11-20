@@ -111,10 +111,41 @@ assert_function load_modules_manifest
 assert_function resolve_modules
 assert_function module_build_args
 assert_function load_geoip_env_file
+assert_function geoip_default_env_file
 assert_function run_module_handler
 assert_function apply_module_patches
+assert_function ensure_nginx_confd_include
 assert_function modules_bundle_url
 assert_function fetch_modules_bundle
+
+# ---------------------------------------------------------------------------
+# nginx.conf include repair for clean installs.
+# ---------------------------------------------------------------------------
+conf_dir="$WORK/nginx-conf"
+mkdir -p "$conf_dir/conf.d"
+cat > "$conf_dir/nginx.conf" <<'EOF'
+events {
+    worker_connections 64;
+}
+
+http {
+    server {
+        listen 80;
+    }
+}
+EOF
+(
+  export INSTALL_DIR="$conf_dir"
+  ensure_nginx_confd_include || exit 1
+  ensure_nginx_confd_include || exit 1
+)
+if [[ $(grep -Fc "include $conf_dir/conf.d/*.conf;" "$conf_dir/nginx.conf") -eq 1 ]] &&
+  [[ $(sed -n '$p' "$conf_dir/nginx.conf") == "}" ]] &&
+  [[ $(sed -n '$!p' "$conf_dir/nginx.conf" | tail -n 1) == *"include $conf_dir/conf.d/*.conf;"* ]]; then
+  pass "adds the conf.d include before the closing http brace once"
+else
+  fail "adds the conf.d include before the closing http brace once"
+fi
 
 # ---------------------------------------------------------------------------
 # Pinned dependencies and checksum helpers.
@@ -160,6 +191,12 @@ set-misc|set-misc-nginx-module|git|--add-module={dir}|ngx-devel-kit|SETMISC
 zstd|zstd-nginx-module|archive|--add-module={dir}||ZSTD
 tlsdyn|patches/tlsdyn.patch|file|||TLSDYN
 EOF
+cat > "$bundle_root/full/bundles.conf" <<'EOF'
+# bundle|comma-separated module ids
+web|headers-more,zstd
+all|headers-more,zstd
+lua|lua-nginx,set-misc
+EOF
 tar -czf "$WORK/nginx-modules-full.tar.gz" -C "$bundle_root" full
 ( cd "$WORK" && sha256sum nginx-modules-full.tar.gz > SHA256SUMS )
 
@@ -174,10 +211,10 @@ bundle_result=$(
   printf '%s' "${MODULE_DIR[headers-more]}"
 )
 assert_eq "headers-more-nginx-module-0.42" "$bundle_result" "parses modules.conf from the bundle"
-if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" && -f "$WORK/bundle-extract/modules.conf" ]]; then
-  pass "extracts the module tree and manifest from the bundle"
+if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" && -f "$WORK/bundle-extract/modules.conf" && -f "$WORK/bundle-extract/bundles.conf" ]]; then
+  pass "extracts the module tree and manifests from the bundle"
 else
-  fail "extracts the module tree and manifest from the bundle"
+  fail "extracts the module tree and manifests from the bundle"
 fi
 
 # Load the extracted fixture manifest in a subshell and inspect the result.
@@ -185,6 +222,7 @@ manifest_resolved() {
   (
     export TEMP_INSTALL_DIR="$WORK/bundle-extract"
     load_modules_manifest || exit 1
+    load_bundles_manifest || exit 1
     resolve_modules "$@" || exit 1
     printf '%s' "${RESOLVED_MODULES[*]}"
   )
@@ -200,12 +238,33 @@ manifest_args() {
 assert_eq "--add-module=$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" \
   "$(manifest_args headers-more)" \
   "maps a manifest build template to the extracted module dir"
+if (
+  export TEMP_INSTALL_DIR="$WORK/bundle-extract"
+  load_modules_manifest || exit 1
+  load_bundles_manifest || exit 1
+  resolve_modules tlsdyn || exit 1
+  NGINX_MODULES=
+  append_module_build_args
+) >/dev/null 2>&1; then
+  pass "appends build args when the last module has none"
+else
+  fail "appends build args when the last module has none"
+fi
 assert_eq "luajit2 ngx-devel-kit lua-nginx" \
   "$(manifest_resolved lua-nginx)" \
   "resolves requires recursively, dependencies first"
 assert_eq "libmaxminddb geoip2" \
   "$(manifest_resolved geoip2)" \
   "resolves the geoip2 library dependency"
+assert_eq "headers-more zstd" \
+  "$(manifest_resolved web)" \
+  "expands a bundle name"
+assert_eq "headers-more zstd" \
+  "$(manifest_resolved all)" \
+  "expands the all bundle"
+assert_eq "luajit2 ngx-devel-kit lua-nginx set-misc" \
+  "$(manifest_resolved lua)" \
+  "expands a bundle and its dependencies"
 assert_eq "" \
   "$(manifest_args libmaxminddb)" \
   "library modules have no configure arguments"
@@ -354,7 +413,11 @@ assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selec
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
 assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
 assert_eq "full" "$(source_get MODULES_PROFILE --profile full)" "--profile sets the built-in profile"
-assert_eq "web" "$(source_get MODULES_BUNDLE --modules-bundle web)" "--modules-bundle sets the bundle"
+if ( source ./nginx_installer.sh --modules-bundle web >/dev/null 2>&1 ); then
+  fail "rejects the removed --modules-bundle option"
+else
+  pass "rejects the removed --modules-bundle option"
+fi
 assert_eq "v2026.11.2" "$(source_get MODULES_REV --modules-rev v2026.11.2)" "--modules-rev sets the release"
 assert_eq "y" "$(source_get MODULES_EXTRA --modules-extra)" "--modules-extra is parsed"
 assert_eq "minimal" "$(source_get MODULES_PROFILE --modules-extra)" "--modules-extra does not change the profile"
@@ -367,6 +430,7 @@ fi
 
 # Module selection by id. The old module flags no longer exist.
 assert_eq "headers-more zstd" "$(source_get MODULES_LIST --modules headers-more,zstd)" "--modules takes comma separated ids"
+assert_eq "web" "$(source_get MODULES_LIST --modules web)" "--modules accepts a bundle name"
 assert_eq "headers-more zstd" "$(source_get MODULES_LIST -M "headers-more zstd")" "-M takes space separated ids"
 assert_eq "headers-more" "$(source_get MODULES_LIST --modules headers-more -M headers-more)" "--modules dedupes repeated ids"
 assert_eq "headers-more zstd" "$(MODULES='headers-more zstd' source_get MODULES_LIST)" "MODULES env selects ids"
@@ -424,10 +488,30 @@ assert_eq "123456|fake-license-key" \
   "$( (
     export HOME="$WORK/geoip-home"
     GEOIP_ENV_FILE='' GEOIP2_ACCOUNT_ID='' GEOIP2_LICENSE_KEY=''
-    prepare_geoip_credentials
+    prepare_geoip_credentials >/dev/null 2>&1
     printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY"
   ) )" \
   "loads the default HOME GeoIP env file"
+mkdir -p "$WORK/sudo-home/.credentials" "$WORK/root-home" "$WORK/bin"
+cp "$WORK/credentials/geoip.env" "$WORK/sudo-home/.credentials/geoip.env"
+cat > "$WORK/bin/getent" <<EOF
+#!/bin/sh
+if [ "\$1" = passwd ] && [ "\$2" = fakeuser ]; then
+  printf '%s\n' 'fakeuser:x:1000:1000::$WORK/sudo-home:/bin/bash'
+  exit 0
+fi
+exit 2
+EOF
+chmod +x "$WORK/bin/getent"
+assert_eq "123456|fake-license-key" \
+  "$( (
+    export PATH="$WORK/bin:$PATH"
+    export HOME="$WORK/root-home" SUDO_USER=fakeuser
+    GEOIP_ENV_FILE='' GEOIP2_ACCOUNT_ID='' GEOIP2_LICENSE_KEY=''
+    prepare_geoip_credentials >/dev/null 2>&1
+    printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY"
+  ) )" \
+  "checks the sudo user's home for the GeoIP env file"
 if ( GEOIP_ENV_FILE="$WORK/credentials/geoip.env" GEOIP2_LICENSE_KEY=''; prepare_geoip_credentials ) >/dev/null 2>&1; then
   pass "loads GeoIP credentials from the env file"
 else

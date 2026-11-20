@@ -15,10 +15,9 @@
    --mainline             |-m   mainline nginx version (auto-detected)
    --detect               |-dt  detect the distro and exit
    --headless             |-hl  headless install
-   --modules              |-M   module ids to build from the bundle (comma separated)
+   --modules              |-M   module ids or bundle names (comma separated)
    --modules-extra        |-me  preset: append the common extra module ids
    --profile              |-p   built-in module profile: minimal or full
-   --modules-bundle       |-mb  module source bundle (default: full)
    --modules-rev          |-mr  nginx-modules release tag (default: latest)
    --geoip-account-id     |-ga  MaxMind account id for geoip2
    --geoip-license-key    |-gk  MaxMind license key for geoip2 (visible in ps)
@@ -41,13 +40,13 @@
 
 Third-party modules are selected by id, not by per-module flags. The ids and their build steps live in `modules.conf` inside the verified [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) bundle; the bundle is the only module source. See that repository's README for the current id list.
 
-- `MODULES="headers-more,fancyindex,..."` or `--modules|-M <ids>` selects ids. `requires` are resolved recursively, so `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
+- `MODULES="headers-more,fancyindex,..."` or `--modules|-M <ids|bundles>` selects modules. `requires` are resolved recursively, so `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
+- `--modules web` or `--modules "web,lua"` expands the curated bundle names from the release (`core`, `web`, `security`, `observability`, `media`, `lua`, `all`; `http3` is legacy for nginx <= 1.24). `all` selects every active third-party module except the TLS alternatives (`openssl`, `libressl`), PageSpeed, and the legacy HTTP/3 stack. nginx 1.25+ builds HTTP/3 natively via `--profile full`. Bundle names and explicit ids can be mixed.
 - No `MODULES` means no bundle download and no third-party modules.
 - `--modules-extra` is only a preset that appends `headers-more,fancyindex,cachepurge,subfilter,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd,openssl`.
 - `SSL=2`/`OPENSSL` appends `openssl`; `SSL=3`/`LIBRESSL` appends `libressl`; `SSL=1`/`SYSTEM` adds nothing.
 - The old module flags (`BROTLI`, `HEADERMOD`, `LUA`, `GEOIP`, `VTS`, `REDIS2`, `ZSTD`, `HTTP3`, `TLSDYN`, `HPACK`, and the rest) no longer exist and select nothing.
-- `MODULES_REV=latest` (default) uses the latest tested bundle; set a release tag to pin it.
-- `MODULES_BUNDLE=full` (default) downloads all module sources once.
+- `MODULES_REV=latest` (default) uses the latest tested release; set a release tag to pin it. Third-party sources always come from the full `nginx-modules` release; `MODULES` selects what compiles.
 - `BADBOT=y` is a separate addon and is not a module id.
 
 ### GeoIP credentials
@@ -66,7 +65,7 @@ GEOIP_ENV_FILE="$HOME/.credentials/geoip.env" \
 # or: ./nginx_installer.sh --modules geoip2 --geoip-env-file "$HOME/.credentials/geoip.env"
 ```
 
-If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoip.env` automatically.
+If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoip.env` automatically. Under `sudo` it checks the invoking user's home first (`$SUDO_USER`), then root's, so a file in your own home works without `-ge`.
 
 `--geoip-account-id` and `--geoip-license-key` also exist, but a key passed in argv is visible in `ps`; prefer the env file or environment variables. The file is parsed, not sourced: only the two keys above are accepted.
 
