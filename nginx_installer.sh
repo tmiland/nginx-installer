@@ -281,13 +281,13 @@ modules_bundle_url() {
     printf '%s' "$MODULES_BUNDLE_URL"
     return 0
   fi
-  [[ -n $MODULES_REPO && -n $MODULES_BUNDLE ]] || return 1
+  [[ -n $MODULES_REPO ]] || return 1
   if [[ $MODULES_REV == latest ]]; then
     base="https://github.com/$MODULES_REPO/releases/latest/download"
   else
     base="https://github.com/$MODULES_REPO/releases/download/$MODULES_REV"
   fi
-  printf '%s/nginx-modules-%s.tar.gz' "$base" "$MODULES_BUNDLE"
+  printf '%s/nginx-modules-full.tar.gz' "$base"
 }
 # Download and verify the full module source bundle, then extract its module
 # tree and manifest into $TEMP_INSTALL_DIR. The bundle is the only module
@@ -297,18 +297,18 @@ fetch_modules_bundle() {
   url=$(modules_bundle_url) || return 1
   sums=${MODULES_SUMS_URL:-$(dirname -- "$url")/SHA256SUMS}
   tmp=$(mktemp -d "$TEMP_INSTALL_DIR/modules-download.XXXXXX") || return 1
-  archive=$tmp/nginx-modules-${MODULES_BUNDLE}.tar.gz
+  archive=$tmp/nginx-modules-full.tar.gz
   curl -fsSL "$url" -o "$archive" || { rm -rf "$tmp"; return 1; }
   curl -fsSL "$sums" -o "$tmp/SHA256SUMS" || { rm -rf "$tmp"; return 1; }
-  ( cd "$tmp" && grep -E "[ *]nginx-modules-${MODULES_BUNDLE}\.tar\.gz$" SHA256SUMS | sha256sum -c - ) ||
+  ( cd "$tmp" && grep -E '[ *]nginx-modules-full\.tar\.gz$' SHA256SUMS | sha256sum -c - ) ||
     { rm -rf "$tmp"; return 1; }
   extract=$tmp/extract
   mkdir -p "$extract" || { rm -rf "$tmp"; return 1; }
   tar -xzf "$archive" -C "$extract" --no-same-owner || { rm -rf "$tmp"; return 1; }
   if [[ -d $extract/modules ]]; then
     src=$extract
-  elif [[ -d $extract/$MODULES_BUNDLE/modules ]]; then
-    src=$extract/$MODULES_BUNDLE
+  elif [[ -d $extract/full/modules ]]; then
+    src=$extract/full
   else
     src=$(dirname -- "$(find "$extract" -maxdepth 2 -type d -name modules -print -quit)") || true
   fi
@@ -317,7 +317,7 @@ fetch_modules_bundle() {
   cp -a "$src/modules/." "$TEMP_INSTALL_DIR/modules/" || { rm -rf "$tmp"; return 1; }
   cp -a "$src/modules.conf" "$TEMP_INSTALL_DIR/modules.conf" || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
-  log_info "Verified nginx-modules ${MODULES_BUNDLE} bundle (${MODULES_REV})"
+  log_info "Verified nginx-modules full bundle (${MODULES_REV})"
 }
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
@@ -458,7 +458,6 @@ SLIB_URL=${SLIB_URL:-https://raw.githubusercontent.com/$REPO_NAME/$SLIB_REV/src/
 # build flags and special build steps for the ids in MODULES.
 MODULES_REPO=${MODULES_REPO:-tmiland/nginx-modules}
 MODULES_REV=${MODULES_REV:-latest}
-MODULES_BUNDLE=${MODULES_BUNDLE:-full}
 MODULES_BUNDLE_URL=${MODULES_BUNDLE_URL:-}
 MODULES_SUMS_URL=${MODULES_SUMS_URL:-}
 
@@ -737,7 +736,6 @@ usage() {
 	printf "%s\\n" "  ${YELLOW}--modules              |-M${NORMAL}   module ids to build from the bundle (comma separated)"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  preset: append the common extra module ids"
 	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
-	printf "%s\\n" "  ${YELLOW}--modules-bundle       |-mb${NORMAL}  module source bundle (default: full)"
 	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
 	printf "%s\\n" "  ${YELLOW}--geoip-account-id     |-ga${NORMAL}      MaxMind account id for geoip2"
 	printf "%s\\n" "  ${YELLOW}--geoip-license-key    |-gk${NORMAL}      MaxMind license key for geoip2 (visible in ps)"
@@ -824,11 +822,6 @@ while [[ $# -gt 0 ]]; do
 				*) fatal "Option --profile requires 'minimal' or 'full'." ;;
 			esac
 			MODULES_PROFILE=$2
-			shift 2
-			;;
-		--modules-bundle | -mb)
-			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules-bundle requires a bundle name."
-			MODULES_BUNDLE=$2
 			shift 2
 			;;
 		--modules-rev | -mr)

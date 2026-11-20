@@ -354,7 +354,11 @@ assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selec
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
 assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
 assert_eq "full" "$(source_get MODULES_PROFILE --profile full)" "--profile sets the built-in profile"
-assert_eq "web" "$(source_get MODULES_BUNDLE --modules-bundle web)" "--modules-bundle sets the bundle"
+if ( source ./nginx_installer.sh --modules-bundle web >/dev/null 2>&1 ); then
+  fail "rejects the removed --modules-bundle option"
+else
+  pass "rejects the removed --modules-bundle option"
+fi
 assert_eq "v2026.11.2" "$(source_get MODULES_REV --modules-rev v2026.11.2)" "--modules-rev sets the release"
 assert_eq "y" "$(source_get MODULES_EXTRA --modules-extra)" "--modules-extra is parsed"
 assert_eq "minimal" "$(source_get MODULES_PROFILE --modules-extra)" "--modules-extra does not change the profile"

@@ -18,7 +18,6 @@
    --modules              |-M   module ids to build from the bundle (comma separated)
    --modules-extra        |-me  preset: append the common extra module ids
    --profile              |-p   built-in module profile: minimal or full
-   --modules-bundle       |-mb  module source bundle (default: full)
    --modules-rev          |-mr  nginx-modules release tag (default: latest)
    --geoip-account-id     |-ga  MaxMind account id for geoip2
    --geoip-license-key    |-gk  MaxMind license key for geoip2 (visible in ps)
@@ -46,8 +45,7 @@ Third-party modules are selected by id, not by per-module flags. The ids and the
 - `--modules-extra` is only a preset that appends `headers-more,fancyindex,cachepurge,subfilter,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd,openssl`.
 - `SSL=2`/`OPENSSL` appends `openssl`; `SSL=3`/`LIBRESSL` appends `libressl`; `SSL=1`/`SYSTEM` adds nothing.
 - The old module flags (`BROTLI`, `HEADERMOD`, `LUA`, `GEOIP`, `VTS`, `REDIS2`, `ZSTD`, `HTTP3`, `TLSDYN`, `HPACK`, and the rest) no longer exist and select nothing.
-- `MODULES_REV=latest` (default) uses the latest tested bundle; set a release tag to pin it.
-- `MODULES_BUNDLE=full` (default) downloads all module sources once.
+- `MODULES_REV=latest` (default) uses the latest tested release; set a release tag to pin it. Third-party sources always come from the full `nginx-modules` release; `MODULES` selects what compiles.
 - `BADBOT=y` is a separate addon and is not a module id.
 
 ### GeoIP credentials
