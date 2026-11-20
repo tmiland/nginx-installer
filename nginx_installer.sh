@@ -299,6 +299,7 @@ append_module_build_args() {
     args=$(module_build_args "$id") || return 1
     [[ -n $args ]] && NGINX_MODULES="$NGINX_MODULES $args"
   done
+  return 0
 }
 # Resolve the release asset for the selected module bundle.
 modules_bundle_url() {

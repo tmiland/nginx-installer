@@ -208,6 +208,18 @@ manifest_args() {
 assert_eq "--add-module=$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" \
   "$(manifest_args headers-more)" \
   "maps a manifest build template to the extracted module dir"
+if (
+  export TEMP_INSTALL_DIR="$WORK/bundle-extract"
+  load_modules_manifest || exit 1
+  load_bundles_manifest || exit 1
+  resolve_modules tlsdyn || exit 1
+  NGINX_MODULES=
+  append_module_build_args
+) >/dev/null 2>&1; then
+  pass "appends build args when the last module has none"
+else
+  fail "appends build args when the last module has none"
+fi
 assert_eq "luajit2 ngx-devel-kit lua-nginx" \
   "$(manifest_resolved lua-nginx)" \
   "resolves requires recursively, dependencies first"
