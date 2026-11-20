@@ -1406,7 +1406,8 @@ NGINX_OPTIONS=${NGINX_OPTIONS:-"
 --user=nginx \
 --group=nginx \
 --with-cc-opt=-Wno-deprecated-declarations \
---with-cc-opt=-Wno-ignored-qualifiers"}
+--with-cc-opt=-Wno-ignored-qualifiers \
+--with-cc-opt=-Wno-error=vla-parameter"}
 
 configure() {
   ./configure $NGINX_OPTIONS $NGINX_MODULES

@@ -163,6 +163,7 @@ EOF
 cat > "$bundle_root/full/bundles.conf" <<'EOF'
 # bundle|comma-separated module ids
 web|headers-more,zstd
+all|headers-more,zstd
 lua|lua-nginx,set-misc
 EOF
 tar -czf "$WORK/nginx-modules-full.tar.gz" -C "$bundle_root" full
@@ -215,6 +216,9 @@ assert_eq "libmaxminddb geoip2" \
 assert_eq "headers-more zstd" \
   "$(manifest_resolved web)" \
   "expands a bundle name"
+assert_eq "headers-more zstd" \
+  "$(manifest_resolved all)" \
+  "expands the all bundle"
 assert_eq "luajit2 ngx-devel-kit lua-nginx set-misc" \
   "$(manifest_resolved lua)" \
   "expands a bundle and its dependencies"
