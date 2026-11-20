@@ -114,8 +114,38 @@ assert_function load_geoip_env_file
 assert_function geoip_default_env_file
 assert_function run_module_handler
 assert_function apply_module_patches
+assert_function ensure_nginx_confd_include
 assert_function modules_bundle_url
 assert_function fetch_modules_bundle
+
+# ---------------------------------------------------------------------------
+# nginx.conf include repair for clean installs.
+# ---------------------------------------------------------------------------
+conf_dir="$WORK/nginx-conf"
+mkdir -p "$conf_dir/conf.d"
+cat > "$conf_dir/nginx.conf" <<'EOF'
+events {
+    worker_connections 64;
+}
+
+http {
+    server {
+        listen 80;
+    }
+}
+EOF
+(
+  export INSTALL_DIR="$conf_dir"
+  ensure_nginx_confd_include || exit 1
+  ensure_nginx_confd_include || exit 1
+)
+if [[ $(grep -Fc "include $conf_dir/conf.d/*.conf;" "$conf_dir/nginx.conf") -eq 1 ]] &&
+  [[ $(sed -n '$p' "$conf_dir/nginx.conf") == "}" ]] &&
+  [[ $(sed -n '$!p' "$conf_dir/nginx.conf" | tail -n 1) == *"include $conf_dir/conf.d/*.conf;"* ]]; then
+  pass "adds the conf.d include before the closing http brace once"
+else
+  fail "adds the conf.d include before the closing http brace once"
+fi
 
 # ---------------------------------------------------------------------------
 # Pinned dependencies and checksum helpers.

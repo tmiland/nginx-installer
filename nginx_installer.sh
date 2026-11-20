@@ -1237,8 +1237,29 @@ run_module_handler() {
 	esac
 }
 
-# Apply the patch modules to the nginx source tree. The fixed order preserves
-# the historical stack: TLS resize, quiche, HTTP/3, then HPACK.
+# `make install` on a clean system writes the stock nginx.conf, which has no
+# conf.d include. Distributions usually ship one, but the installer writes its
+# lua_package_path there, so add the include when it is missing.
+ensure_nginx_confd_include() {
+	local conf=$INSTALL_DIR/nginx.conf inc
+	[[ -f $conf ]] || return 0
+	inc="include $INSTALL_DIR/conf.d/*.conf;"
+	grep -Fq "$inc" "$conf" && return 0
+	awk -v inc="    $inc" '
+		{ line[NR] = $0; if ($0 ~ /^[[:space:]]*}[[:space:]]*$/) last = NR }
+		END {
+			if (!last) exit 1
+			for (i = 1; i <= NR; i++) {
+				if (i == last) print inc
+				print line[i]
+			}
+		}
+	' "$conf" > "${conf}.tmp" || { rm -f "${conf}.tmp"; return 1; }
+	chmod --reference="$conf" "${conf}.tmp" 2>/dev/null || true
+	mv "${conf}.tmp" "$conf"
+}
+
+
 apply_module_patches() {
 	local src=$TEMP_INSTALL_DIR/nginx-$NGINX_VER file
 	if ! module_resolved tlsdyn && ! module_resolved quiche &&
@@ -1634,6 +1655,8 @@ EOF
 			strip -s /usr/sbin/nginx
 			if [[ -d $INSTALL_DIR/conf.d ]]; then
 				if module_resolved lua-nginx; then
+					ensure_nginx_confd_include ||
+						fatal "Could not add the conf.d include to $INSTALL_DIR/nginx.conf."
 					# add necessary `lua_package_path` directive to `nginx.conf`, in the http context
 					tee "$INSTALL_DIR/conf.d/lua_package_path.conf" <<EOF >>"${RUN_LOG}" 2>&1
 lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";
