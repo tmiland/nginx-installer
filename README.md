@@ -7,8 +7,8 @@ Build nginx from source with verified modules, selectable profiles, and GeoIP su
 [![Latest release](https://img.shields.io/github/v/release/tmiland/nginx-installer?style=for-the-badge)](https://github.com/tmiland/nginx-installer/releases)
 [![License](https://img.shields.io/github/license/tmiland/nginx-installer?style=for-the-badge)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
 [![Bash](https://img.shields.io/badge/language-bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)](https://github.com/tmiland/nginx-installer)
-[![Tests](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml)
-[![Install matrix](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml/badge.svg?branch=main)](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/tmiland/nginx-installer/tests.yml?branch=main&label=tests&style=for-the-badge)](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml)
+[![Install matrix](https://img.shields.io/github/actions/workflow/status/tmiland/nginx-installer/test-install.yml?branch=main&label=install%20matrix&style=for-the-badge)](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml)
 
 [Installation](#installation) · [Usage](#usage) · [Profiles](#built-in-module-profiles) · [Modules](#module-selection) · [GeoIP](#geoip-credentials) · [Requirements](#requirements)
 
