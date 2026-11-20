@@ -157,6 +157,75 @@ jobs:
           path: nginx_installer.log
           if-no-files-found: ignore
 
+  modules-install:
+    name: Modules Debian 13
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: debian:13
+    env:
+      TERM: xterm
+      HEADLESS: "y"
+      NGINX_VERSION: ${{ github.event.inputs.nginx_version || '1.30.7' }}
+      HEADERMOD: "y"
+      FANCYINDEX: "y"
+      CACHEPURGE: "y"
+      SUBFILTER: "y"
+      VTS: "y"
+      WEBDAV: "y"
+      RTMP: "y"
+      TESTCOOKIE: "y"
+      REDIS2: "n"
+      SRCACHE: "y"
+      SETMISC: "y"
+      LUA: "y"
+      NGXECHO: "y"
+      ZSTF: "y"
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ca-certificates curl git lsb-release procps ncurses-bin
+      - uses: actions/checkout@v4
+      - name: Stub systemd for the container
+        run: |
+          cat > /usr/local/bin/systemctl <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod +x /usr/local/bin/systemctl
+          command -v systemctl
+      - name: Build nginx with modules from nginx-modules
+        run: ./nginx_installer.sh --nginx "${NGINX_VERSION}"
+      - name: Show installer log on failure
+        if: failure()
+        run: |
+          echo "=== nginx_installer.log (last 200 lines) ==="
+          tail -n 200 nginx_installer.log || true
+      - name: Verify modules
+        run: |
+          set -eux
+          test -x /usr/sbin/nginx
+          /usr/sbin/nginx -t
+          version_out=$(/usr/sbin/nginx -V 2>&1)
+          for m in headers-more fancyindex ngx_cache_purge substitutions_filter \
+            nginx-module-vts echo-nginx-module zstd-nginx-module lua-nginx-module \
+            set-misc-nginx-module srcache-nginx-module nginx-dav-ext-module \
+            nginx-rtmp-module testcookie-nginx-module; do
+            printf '%s\n' "$version_out" | grep -q -- "$m"
+          done
+          test "$(cat /etc/nginx/installed_version)" = "${NGINX_VERSION}"
+          grep -q "Verified nginx-modules full bundle" nginx_installer.log
+          echo "nginx ${NGINX_VERSION} modules verified on $(. /etc/os-release && echo "$PRETTY_NAME")"
+      - name: Upload installer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-installer-log-modules
+          path: nginx_installer.log
+          if-no-files-found: ignore
+
   latest-install:
     name: Latest stable ${{ matrix.name }}
     # Weekly and manual only: follows nginx.org's current stable release, so it
