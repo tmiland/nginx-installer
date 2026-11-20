@@ -129,7 +129,7 @@ jobs:
           /usr/sbin/nginx -V 2>&1 | grep -q 'built with Nginx Installer @tmiland'
           /usr/sbin/nginx -t
           test "$(cat /etc/nginx/installed_version)" = "${NGINX_VERSION}"
-          grep -q "Downloading nginx release-${NGINX_VERSION}" nginx_installer.log
+          grep -q "Verified nginx ${NGINX_VERSION} source (PGP)" nginx_installer.log
           echo "nginx ${installed} installed and verified on $(. /etc/os-release && echo "$PRETTY_NAME")"
       - name: Uninstall and verify cleanup
         env:
@@ -200,22 +200,22 @@ jobs:
         run: |
           echo "=== nginx_installer.log (last 200 lines) ==="
           tail -n 200 nginx_installer.log || true
-      - name: Verify the stable branch was built
+      - name: Verify the current stable version
         run: |
           set -eux
           test -x /usr/sbin/nginx
           installed=$(/usr/sbin/nginx -V 2>&1 | sed -n 's/^nginx version: nginx\///p')
           test -n "$installed"
-          branch=$(sed -n 's/.*Downloading nginx \(stable-[0-9][0-9.]*\)\.\.\..*/\1/p' nginx_installer.log | head -n 1)
-          test -n "$branch"
-          case "$installed" in
-            "${branch#stable-}"*) ;;
-            *) echo "FAIL: installed $installed is not on $branch"; exit 1 ;;
-          esac
+          expected=$(curl -fsS https://nginx.org/en/download.html |
+            grep -oP '(?<=Stable version).*?(?=[0-9]+\.[0-9]+\.[0-9]</a)' |
+            grep -oP '[0-9]+\.[0-9]+\.[0-9]' | head -n 1)
+          test -n "$expected"
+          test "$installed" = "$expected"
+          grep -q "Verified nginx ${installed} source (PGP)" nginx_installer.log
           /usr/sbin/nginx -V 2>&1 | grep -q 'built with Nginx Installer @tmiland'
           /usr/sbin/nginx -t
           test "$(cat /etc/nginx/installed_version)" = "$installed"
-          echo "nginx ${installed} built from $branch on $(. /etc/os-release && echo "$PRETTY_NAME")"
+          echo "nginx ${installed} (current stable) verified on $(. /etc/os-release && echo "$PRETTY_NAME")"
       - name: Uninstall and verify cleanup
         env:
           RM_CONF: "y"
