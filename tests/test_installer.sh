@@ -394,6 +394,9 @@ EOF
 assert_eq "$WORK/credentials/geoip.env" "$(source_get GEOIP_ENV_FILE --geoip-env-file "$WORK/credentials/geoip.env")" "--geoip-env-file is parsed"
 assert_eq "123456" "$(source_get GEOIP2_ACCOUNT_ID --geoip-account-id 123456)" "--geoip-account-id is parsed"
 assert_eq "fake" "$(source_get GEOIP2_LICENSE_KEY --geoip-license-key fake)" "--geoip-license-key is parsed"
+assert_eq "$WORK/credentials/geoip.env" "$(source_get GEOIP_ENV_FILE -ge "$WORK/credentials/geoip.env")" "-ge is parsed"
+assert_eq "123456" "$(source_get GEOIP2_ACCOUNT_ID -ga 123456)" "-ga is parsed"
+assert_eq "fake" "$(source_get GEOIP2_LICENSE_KEY -gk fake)" "-gk is parsed"
 assert_eq "123456|fake-license-key" \
   "$( ( load_geoip_env_file "$WORK/credentials/geoip.env"; printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY" ) )" \
   "loads GeoIP credentials and strips quotes"

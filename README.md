@@ -20,9 +20,9 @@
    --profile              |-p   built-in module profile: minimal or full
    --modules-bundle       |-mb  module source bundle (default: full)
    --modules-rev          |-mr  nginx-modules release tag (default: latest)
-   --geoip-account-id          MaxMind account id for geoip2
-   --geoip-license-key         MaxMind license key for geoip2 (visible in ps)
-   --geoip-env-file            file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY
+   --geoip-account-id     |-ga  MaxMind account id for geoip2
+   --geoip-license-key    |-gk  MaxMind license key for geoip2 (visible in ps)
+   --geoip-env-file       |-ge  file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY
    --bad-bot              |-bb  install the bad bot blocker
    --dir                  |-d   temporary build directory
    --verbose              |-v   increase verbosity
