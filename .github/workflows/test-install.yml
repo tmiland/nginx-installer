@@ -189,7 +189,7 @@ jobs:
           chmod +x /usr/local/bin/systemctl
           command -v systemctl
       - name: Build nginx with modules from nginx-modules
-        run: ./nginx_installer.sh --headless --profile "$PROFILE" --modules "$MODULE_SELECTION" --modules-rev v2026.11.5 --nginx "${NGINX_VERSION}"
+        run: ./nginx_installer.sh --headless --profile "$PROFILE" --modules "$MODULE_SELECTION" --modules-rev v2026.11.6 --nginx "${NGINX_VERSION}"
       - name: Show installer log on failure
         if: failure()
         run: |
@@ -209,6 +209,12 @@ jobs:
           done
           test "$(cat /etc/nginx/installed_version)" = "${NGINX_VERSION}"
           grep -q "Verified nginx-modules full bundle" nginx_installer.log
+          # nginx -t does not run init_by_lua, so start it to catch runtime
+          # Lua module version mismatches, then stop it again.
+          /usr/sbin/nginx
+          sleep 2
+          pgrep -x nginx >/dev/null
+          /usr/sbin/nginx -s stop
           echo "nginx ${NGINX_VERSION} modules verified on $(. /etc/os-release && echo "$PRETTY_NAME")"
       - name: Upload installer log
         if: always()
