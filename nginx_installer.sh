@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2221,SC2222,SC2181,SC2174,SC2086,SC2046,SC2005,SC2317
+# shellcheck disable=SC2221,SC2222,SC2181,SC2174,SC2086,SC2046,SC2005,SC2317,SC2329
 
 ## Author: Tommy Miland (@tmiland) - Copyright (c) 2026
 
