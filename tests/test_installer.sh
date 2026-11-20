@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016,SC2030,SC2031
 # Unit tests for nginx_installer.sh. No install is performed: the script is
 # sourced with NGINX_INSTALLER_LIB_ONLY=1, which returns after option parsing.
 
@@ -96,33 +97,100 @@ trap 'rm -rf "$WORK"' EXIT
 # ---------------------------------------------------------------------------
 # Helpers must exist before behaviour is meaningful.
 # ---------------------------------------------------------------------------
-assert_function nginx_stable_ref
-assert_function nginx_git_ref
 assert_function validate_build_dir
 assert_function prepare_build_dir
 assert_function validate_install_dir
 assert_function nginx_source_version
 assert_function detect_distro
+assert_function verify_sha256
+assert_function download_verified
+assert_function load_slib
+assert_function clone_pinned
+assert_function fetch_nginx_source
 
 # ---------------------------------------------------------------------------
-# Version detection and git ref selection.
+# Pinned dependencies and checksum helpers.
+# ---------------------------------------------------------------------------
+assert_eq "$(sha256sum src/slib.sh | awk '{print $1}')" "${SLIB_SHA256:-}" "SLIB_SHA256 pins the vendored slib"
+if [[ ${SLIB_REV:-} =~ ^[0-9a-f]{40}$ ]]; then
+  pass "SLIB_REV is a full commit SHA"
+else
+  fail "SLIB_REV is a full commit SHA"
+fi
+assert_contains "${SLIB_URL:-}" "/${SLIB_REV:-missing}/" "SLIB_URL uses the pinned revision"
+
+# The release asset has no src/slib.sh; it must download and verify the pinned
+# copy. This uses the real curl, not the test stub.
+standalone="$WORK/standalone"
+mkdir -p "$standalone"
+cp nginx_installer.sh "$standalone/"
+standalone_out=$(
+  (
+    export PATH=${PATH#"$WORK/bin:"}
+    unset NGINX_INSTALLER_LIB_ONLY
+    export SLIB_URL="file://$ROOT/src/slib.sh"
+    export LOGFILE="$WORK/standalone.log"
+    bash "$standalone/nginx_installer.sh" --detect
+  ) 2>/dev/null
+)
+assert_contains "$standalone_out" "DISTRO_GROUP=Debian" "standalone release path verifies the pinned slib"
+
+assert_eq "14" "${#MODULE_PINS[@]}" "pins every git-based module"
+for name in brotli cachepurge subfilter modsecurity modsecurity_nginx fancyindex dav_ext vts rtmp testcookie redis2 srcache set_misc quiche; do
+  if [[ ${MODULE_PINS[$name]:-} =~ ^[0-9a-f]{40}$ ]]; then
+    pass "MODULE_PINS[$name] is a commit SHA"
+  else
+    fail "MODULE_PINS[$name] is a commit SHA"
+  fi
+done
+
+for var in BADBOT_REV TLSDYN_REV NGINX_AUTOINSTALL_REV OPENSSL_PATCH_REV; do
+  value=${!var:-}
+  if [[ $value =~ ^[0-9a-f]{40}$ ]]; then
+    pass "$var is a commit SHA"
+  else
+    fail "$var is a commit SHA"
+  fi
+done
+for var in SLIB_SHA256 BADBOT_SHA256 TLSDYN_SHA256 HTTP3_PATCH_SHA256 HPACK_HTTP3_PATCH_SHA256 HPACK_PATCH_SHA256 RUSTUP_X86_64_SHA256 RUSTUP_AARCH64_SHA256 MODSEC_CONF_SHA256; do
+  value=${!var:-}
+  if [[ $value =~ ^[0-9a-f]{64}$ ]]; then
+    pass "$var is a sha256"
+  else
+    fail "$var is a sha256"
+  fi
+done
+
+assert_eq "5" "$(printf '%s\n' "${NGINX_SIGNING_KEY_IDS:-}" | wc -w)" "pins five nginx signing keys"
+assert_contains "${NGINX_SIGNING_KEY_IDS:-}" "D6786CE303D9A9022998DC6CC8464D549AF75C0A" "includes the 1.30 release signer"
+if [[ ${RUSTUP_VERSION:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  pass "RUSTUP_VERSION is pinned"
+else
+  fail "RUSTUP_VERSION is pinned"
+fi
+
+printf 'pinned\n' > "$WORK/checksum"
+sum=$(sha256sum "$WORK/checksum" | awk '{print $1}')
+assert_ok "verify_sha256 accepts a matching file" verify_sha256 "$WORK/checksum" "$sum"
+assert_not_ok "verify_sha256 rejects a mismatch" verify_sha256 "$WORK/checksum" "0000000000000000000000000000000000000000000000000000000000000000"
+
+if grep -qE '(^|[^#])\becho[[:space:]]+\$GEOIP2_URL' nginx_installer.sh; then
+  fail "does not echo the GeoIP download URL"
+else
+  pass "does not echo the GeoIP download URL"
+fi
+if grep -q 'curl -sSL https://github.com' README.md; then
+  fail "README uses curl -fsSL"
+else
+  pass "README uses curl -fsSL"
+fi
+
+
+# ---------------------------------------------------------------------------
+# Version detection.
 # ---------------------------------------------------------------------------
 assert_eq "1.30.7" "$(latest_nginx Stable)" "latest_nginx parses the stable version"
 assert_eq "1.31.9" "$(latest_nginx Mainline)" "latest_nginx parses the mainline version"
-
-assert_eq "stable-1.30" "$(nginx_stable_ref 1.30.7)" "stable ref drops the patch level"
-assert_eq "stable-1.30" "$(nginx_stable_ref 1.30.0)" "stable ref handles a .0 release"
-assert_not_ok "stable ref rejects a two-part version" nginx_stable_ref 1.30
-assert_not_ok "stable ref rejects garbage" nginx_stable_ref nginx
-
-git_ref_for() {
-  ( NGINX_VER=$1; NGINX_VER_NAME=$2; nginx_git_ref )
-}
-assert_eq "stable-1.30" "$(git_ref_for 1.30.7 stable)" "stable channel uses the stable branch"
-assert_eq "stable-1.30" "$(git_ref_for 1.30.7 Stable)" "stable channel tolerates an upper-case name"
-assert_eq "master" "$(git_ref_for 1.31.9 mainline)" "mainline channel uses master"
-assert_eq "release-1.30.7" "$(git_ref_for 1.30.7 custom)" "custom version uses its release tag"
-assert_not_ok "custom ref rejects a non-version" git_ref_for foo custom
 
 # ---------------------------------------------------------------------------
 # Option parsing.
@@ -135,21 +203,11 @@ source_get() {
     printf '%s' "${!var}"
   )
 }
-source_ref() {
-  (
-    # shellcheck source=/dev/null
-    source ./nginx_installer.sh "$@" >/dev/null
-    nginx_git_ref
-  )
-}
 
 assert_eq "stable" "$(source_get NGINX_VER_NAME --stable)" "--stable selects the stable channel"
 assert_eq "stable" "$(source_get NGINX_VER_NAME)" "the default is the stable channel"
-assert_eq "stable-1.30" "$(source_ref --stable)" "--stable resolves the stable branch"
-assert_eq "stable-1.30" "$(source_ref)" "the default resolves the stable branch"
 assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selects the mainline channel"
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
-assert_eq "release-1.30.7" "$(source_ref --nginx 1.30.7)" "--nginx resolves its release tag"
 assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
 
 if ( source ./nginx_installer.sh --nginx 1.30 >/dev/null 2>&1 ); then

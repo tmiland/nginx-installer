@@ -19,3 +19,28 @@ jobs:
         run: bash -n nginx_installer.sh tests/test_installer.sh
       - name: Run unit tests
         run: bash tests/test_installer.sh
+
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint shell scripts
+        run: shellcheck nginx_installer.sh src/slib.sh tests/test_installer.sh
+
+  slib-pin:
+    name: slib pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the pinned slib URL serves SLIB_SHA256
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090,SC1091
+          source <(grep -E '^(REPO_NAME|SLIB_REV|SLIB_SHA256|SLIB_URL)=' nginx_installer.sh)
+          tmp=$(mktemp)
+          curl -fsSL "$SLIB_URL" -o "$tmp"
+          echo "$SLIB_SHA256  $tmp" | sha256sum -c -
+          echo "pinned slib URL OK"

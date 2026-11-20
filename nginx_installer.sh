@@ -52,6 +52,7 @@ DETECT_ONLY=0
 # Get script filename
 self=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_FILENAME=$(basename "$self")
+SCRIPT_DIR=$(dirname "$self")
 # Logfile
 LOGFILE=${LOGFILE:-$CURRDIR/nginx_installer.log}
 # Default processing units (all available)
@@ -70,43 +71,119 @@ INSTALL_DIR=${INSTALL_DIR:-/etc/nginx}
 # }
 latest_nginx() {
 	curl -s https://nginx.org/en/download.html |
-	grep -oP "(?<="$1" version).*?(?=[0-9]+\.[0-9]+\.[0-9](-[0-9])?</a)" |
-	grep -oP "[0-9]+\.[0-9]+\.[0-9](-[0-9])?"
+	grep -oP '(?<='"$1"' version).*?(?=[0-9]+\.[0-9]+\.[0-9](-[0-9])?</a)' |
+	grep -oP '[0-9]+\.[0-9]+\.[0-9](-[0-9])?'
 }
 # True when the argument looks like an nginx release version (X.Y.Z).
 is_nginx_version() {
   [[ ${1:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-}
-# Map a release version to its stable branch (1.30.7 -> stable-1.30).
-nginx_stable_ref() {
-  is_nginx_version "${1:-}" || return 1
-  printf 'stable-%s\n' "${1%.*}"
-}
-# Pick the git ref to build for the selected channel.
-nginx_git_ref() {
-  local name=${NGINX_VER_NAME:-stable}
-  name=${name,,}
-  case "$name" in
-    stable)
-      nginx_stable_ref "${NGINX_VER:-}"
-      ;;
-    mainline)
-      printf 'master\n'
-      ;;
-    custom)
-      is_nginx_version "${NGINX_VER:-}" || return 1
-      printf 'release-%s\n' "$NGINX_VER"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
 }
 # Read NGINX_VERSION from a source-tree nginx.h by name, not by line number.
 nginx_source_version() {
   local header=${1:-}
   [[ -f $header ]] || return 1
   awk -F'"' '/^#define[[:space:]]+NGINX_VERSION[[:space:]]/ { print $2; exit }' "$header"
+}
+# Verify a file against an expected sha256.
+verify_sha256() {
+  local file=${1:-} expected=${2:-} actual
+  [[ -f $file && -n $expected ]] || return 1
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  actual=$(sha256sum -- "$file" | awk '{print $1}') || return 1
+  [[ $actual == "$expected" ]]
+}
+# Download a pinned file and verify its sha256 before returning success.
+download_verified() {
+  local url=${1:-} dest=${2:-} expected=${3:-}
+  [[ -n $url && -n $dest && -n $expected ]] || return 1
+  mkdir -p -- "$(dirname -- "$dest")" || return 1
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$dest" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$dest" "$url" || return 1
+  else
+    return 1
+  fi
+  verify_sha256 "$dest" "$expected"
+}
+# Source slib from the checkout when present, otherwise from the pinned
+# revision. Nothing is executed before its sha256 matches SLIB_SHA256.
+load_slib() {
+  local source_file temp_file=""
+  if [[ -f $SCRIPT_DIR/src/slib.sh ]]; then
+    source_file=$SCRIPT_DIR/src/slib.sh
+  else
+    temp_file=$(mktemp "${TMPDIR:-/tmp}/nginx-installer-slib.XXXXXX") || return 1
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "$SLIB_URL" -o "$temp_file" || { rm -f "$temp_file"; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO "$temp_file" "$SLIB_URL" || { rm -f "$temp_file"; return 1; }
+    else
+      rm -f "$temp_file"
+      return 1
+    fi
+    source_file=$temp_file
+  fi
+  if [[ ${SLIB_SKIP_VERIFY:-0} != 1 ]] && ! verify_sha256 "$source_file" "$SLIB_SHA256"; then
+    echo "slib checksum mismatch: $source_file (set SLIB_SKIP_VERIFY=1 for a local edit)" >&2
+    [[ -n $temp_file ]] && rm -f "$temp_file"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  . "$source_file" || { [[ -n $temp_file ]] && rm -f "$temp_file"; return 1; }
+  [[ -n $temp_file ]] && rm -f "$temp_file"
+  return 0
+}
+# Clone a module at the exact revision recorded in MODULE_PINS. Fetching the
+# SHA directly works for older commits that are not in a shallow branch tip.
+clone_pinned() {
+  local name=${1:-} url=${2:-} dir=${3:-}
+  local rev=${MODULE_PINS[$name]:-} head
+  [[ -n $name && -n $url && -n $dir ]] || return 1
+  [[ $rev =~ ^[0-9a-f]{40}$ ]] || return 1
+  rm -rf -- "$dir" || return 1
+  mkdir -p -- "$dir" || return 1
+  git -C "$dir" init --quiet || return 1
+  git -C "$dir" remote add origin "$url" || return 1
+  if git -C "$dir" fetch --quiet --depth 1 origin "$rev"; then
+    git -C "$dir" checkout --quiet FETCH_HEAD || return 1
+  else
+    git -C "$dir" fetch --quiet origin || return 1
+    git -C "$dir" checkout --quiet "$rev" || return 1
+  fi
+  head=$(git -C "$dir" rev-parse HEAD) || return 1
+  [[ $head == "$rev" ]] || { echo "pinned revision mismatch for $name" >&2; return 1; }
+}
+# Download the nginx release tarball and verify its PGP signature against the
+# pinned nginx.org signing keys before extracting it.
+fetch_nginx_source() {
+  local version=${1:-} dest=${2:-}
+  local tmp gnupg entry url expected actual
+  is_nginx_version "$version" || return 1
+  command -v gpg >/dev/null 2>&1 || return 1
+  tmp=$(mktemp -d "$TEMP_INSTALL_DIR/nginx-download.XXXXXX") || return 1
+  gnupg=$tmp/gnupg
+  mkdir -m 700 "$gnupg" || return 1
+  curl -fsSL "https://nginx.org/download/nginx-${version}.tar.gz" -o "$tmp/nginx.tar.gz" || return 1
+  curl -fsSL "https://nginx.org/download/nginx-${version}.tar.gz.asc" -o "$tmp/nginx.tar.gz.asc" || return 1
+  for entry in "${NGINX_SIGNING_KEYS[@]}"; do
+    url=${entry%%|*}
+    expected=${entry##*|}
+    curl -fsSL "$url" -o "$tmp/signing.key" || return 1
+    actual=$(GNUPGHOME="$gnupg" gpg --batch --with-colons --show-keys "$tmp/signing.key" 2>/dev/null |
+      awk -F: '/^fpr:/ { print $10; exit }')
+    [[ $actual == "$expected" ]] || return 1
+    case " $NGINX_SIGNING_KEY_IDS " in
+      *" $actual "*) ;;
+      *) return 1 ;;
+    esac
+    GNUPGHOME="$gnupg" gpg --batch --quiet --import "$tmp/signing.key" || return 1
+  done
+  GNUPGHOME="$gnupg" gpg --batch --verify "$tmp/nginx.tar.gz.asc" "$tmp/nginx.tar.gz" >/dev/null 2>&1 || return 1
+  mkdir -p -- "$dest" || return 1
+  tar -xzf "$tmp/nginx.tar.gz" -C "$dest" --strip-components=1 || return 1
+  rm -rf -- "$tmp"
+  log_info "Verified nginx ${version} source (PGP)"
 }
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
@@ -238,8 +315,10 @@ NGINX_VER_NAME=${NGINX_VER_NAME,,}
 CURRENT_VER=$INSTALL_DIR/installed_version
 # Repo name for this script
 REPO_NAME="tmiland/nginx-installer"
-# Functions url
-SLIB_URL=https://raw.githubusercontent.com/$REPO_NAME/main/src/slib.sh
+# slib is pinned to a commit and verified by sha256 before it is sourced.
+SLIB_REV=595e489b7a6e4d6662333608d4056b519a75272a
+SLIB_SHA256=b59fe3a9ede69a7e58af2c395b7cc7d655f96346a365abdd21f8471cce0ed036
+SLIB_URL=${SLIB_URL:-https://raw.githubusercontent.com/$REPO_NAME/$SLIB_REV/src/slib.sh}
 
 # Define module versions
 LIBRESSL_VER=${LIBRESSL_VER:-4.1.0}
@@ -257,26 +336,58 @@ HTTPREDIS_VER=${HTTPREDIS_VER:-0.3.9}
 NGXECHO_VER=${NGXECHO_VER:-0.63}
 ZSTD_VER=${ZSTD_VER:-0.1.1}
 
+# Pinned revisions for git-based modules. Fetched by SHA, so a branch moving
+# upstream cannot change what this script builds.
+declare -A MODULE_PINS=(
+	[brotli]=25f86f0bac1101b6512135eac5f93c49c63609e3
+	[cachepurge]=331fe43e8d9a3d1fa5e0c9fec7d3201d431a9177
+	[subfilter]=e12e965ac1837ca709709f9a26f572a54d83430e
+	[modsecurity]=475aece84b0823a4318cf31c558a9584d660dc47
+	[modsecurity_nginx]=30a4747a170ad26848ae5112f4c0f8b7ad94156c
+	[fancyindex]=70311f239ec1e88ff79c669d126d08532ddb8554
+	[dav_ext]=f5e30888a256136d9c550bf1ada77d6ea78a48af
+	[vts]=3b9235819e4a8bdadd30fbb70434b07d20c33248
+	[rtmp]=6c7719d0ba32e00b563ec70bd43dad11960fa9c4
+	[testcookie]=de7ca883344ff154f6c9cebc7289a54039e238d3
+	[redis2]=0e7f942deae4cd3e85c8891fa30a815df9659e82
+	[srcache]=3febcaa6d6e222047173c9701d855598141b3aab
+	[set_misc]=4a4e2ce09ac8a6505a58ef8a2265ff42a87a0c9d
+	[quiche]=d448b6b239652b09e81c8dde883b98cd5827c31f
+)
+
+# Pinned scripts, patches, and nginx signing keys.
+BADBOT_REV=de661720daf023c6d4d840c7216d608c23dac445
+BADBOT_SHA256=92db080637ec21883f608abd0a512678780a267c3d56f3e683b641ad11079aea
+TLSDYN_REV=afb50796c16a2a8cdebfdd86ebb8806b05db3a35
+TLSDYN_SHA256=edf627dd38f8092f81703226ef17d7ad11f5c1aeabe2bd64686bac7ad6b79094
+NGINX_AUTOINSTALL_REV=da89d6c05ae1f456f4529aad5a6085a633f108ff
+HTTP3_PATCH_SHA256=b9f14740113a550bb7b05a0f082446ecc654b04d68714b0f544b7a201845e591
+HPACK_HTTP3_PATCH_SHA256=6cf3c61d749a17ffdfd5c85dbd914757af7d265845796cb9fc1b8da824fa5361
+OPENSSL_PATCH_REV=c48a1f85a70c649364bb82daca13dc14a14df8c1
+HPACK_PATCH_SHA256=452d20ffeda8eecca5f3338838cb907b38b2e1b0674568665b51101d834b60f3
+RUSTUP_VERSION=1.27.1
+RUSTUP_X86_64_SHA256=6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d
+RUSTUP_AARCH64_SHA256=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2
+MODSEC_CONF_SHA256=a4b9bed9b27e9be225b76d3965b4237416aba62432c9824aca431dbac4e72f43
+NGINX_SIGNING_KEY_IDS="43387825DDB1BB97EC36BA5D007C8D7C15D87369 8540A6F18833A80E9C1653A42FD21310B49F6B46 D6786CE303D9A9022998DC6CC8464D549AF75C0A 7338973069ED3F443F4D37DFA64FD5B17ADB39A8 13C82A63B603576156E30A4EA0EA981B66B0D967"
+NGINX_SIGNING_KEYS=(
+	"https://nginx.org/keys/arut.key|43387825DDB1BB97EC36BA5D007C8D7C15D87369"
+	"https://nginx.org/keys/nginx_signing.key|8540A6F18833A80E9C1653A42FD21310B49F6B46"
+	"https://nginx.org/keys/pluknet.key|D6786CE303D9A9022998DC6CC8464D549AF75C0A"
+	"https://nginx.org/keys/sb.key|7338973069ED3F443F4D37DFA64FD5B17ADB39A8"
+	"https://nginx.org/keys/thresh.key|13C82A63B603576156E30A4EA0EA981B66B0D967"
+)
+
 if [ -f $CURRENT_VER ]; then
   CURRENT_VER=$(cat "$CURRENT_VER")
 else
 	CURRENT_VER=none
 fi
-# Include functions
-if [[ -f $CURRDIR/src/slib.sh ]]; then
-  # shellcheck disable=SC1091
-  . ./src/slib.sh
-else
-  if [[ $(command -v 'curl') ]]; then
-    # shellcheck source=/dev/null
-    source <(curl -sSLf $SLIB_URL)
-  elif [[ $(command -v 'wget') ]]; then
-    # shellcheck source=/dev/null
-    . <(wget -qO - $SLIB_URL)
-  else
-    echo -e "${RED}${BALLOT_X} This script requires curl or wget.\nProcess aborted${NORMAL}"
-    exit 0
-  fi
+# Include functions. slib is verified against SLIB_SHA256 before it runs.
+if ! load_slib; then
+  echo "Failed to load or verify src/slib.sh (pin ${SLIB_REV})." >&2
+  echo "Set SLIB_SKIP_VERIFY=1 only for a local development edit." >&2
+  exit 1
 fi
 
 # Setup slog
@@ -667,11 +778,9 @@ then
   exit 0
 fi
 
-# Resolve the requested version and git ref before changing the system.
+# Validate the requested version before changing the system.
 is_nginx_version "${NGINX_VER:-}" ||
   fatal "Could not determine the nginx version (got '${NGINX_VER:-empty}'). Check access to nginx.org or pass --nginx X.Y.Z."
-NGINX_GIT_REF=$(nginx_git_ref) ||
-  fatal "Could not resolve a git ref for ${NGINX_VER_NAME:-stable} nginx ${NGINX_VER}."
 
 chk_nginx
 
@@ -707,11 +816,11 @@ PKGCHK=""
 shopt -s nocasematch
 if [[ $DISTRO_GROUP == "Debian" ]]; then
   export DEBIAN_FRONTEND=noninteractive
-  UPDATE="apt-get -o Dpkg::Progress-Fancy="1" update -qq"
-  INSTALL="apt-get -o Dpkg::Progress-Fancy="1" install -qq"
+  UPDATE="apt-get -o Dpkg::Progress-Fancy=1 update -qq"
+  INSTALL="apt-get -o Dpkg::Progress-Fancy=1 install -qq"
   PKGCHK="dpkg -s"
   # Install packages
-  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev"
+  INSTALL_PKGS="wget curl git build-essential apt-transport-https ca-certificates libpcre2-dev autoconf unzip automake libtool tar git libssl-dev zlib1g-dev uuid-dev libxml2-dev libxslt1-dev cmake libperl-dev gnupg"
 else
   echo -e "${RED}${BALLOT_X} Error: Sorry, your OS is not supported.${NORMAL}"
   exit 1;
@@ -782,6 +891,9 @@ if [[ $MODULES_EXTRA == 'y' ]]; then
 	RM_CONF=${RM_CONF:-n}
 	RM_LOGS=${RM_LOGS:-n}
 fi
+
+# The MaxMind key is only used in this shell; keep it out of child environments.
+export -n GEOIP2_LICENSE_KEY 2>/dev/null || true
 
 # Define default options
 NGINX_OPTIONS=${NGINX_OPTIONS:-"
@@ -869,10 +981,8 @@ download_modules() {
 	#Brotli
 	if [[ $BROTLI == 'y' ]]; then
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		git clone https://github.com/google/ngx_brotli
-		cd ngx_brotli || exit 1
-		git checkout v1.0.0rc
-		git submodule update --init
+		clone_pinned brotli https://github.com/google/ngx_brotli "$TEMP_INSTALL_DIR/modules/ngx_brotli" || exit 1
+		git -C "$TEMP_INSTALL_DIR/modules/ngx_brotli" submodule update --init --recursive --depth 1 || exit 1
 	fi
 
 	# More Headers
@@ -900,25 +1010,36 @@ download_modules() {
 
 			mkdir geoip-db
 			cd geoip-db || exit 1
-			# - Download GeoLite2 databases using license key
-			# - Apply the correct, dated filename inside the checksum file to each download instead of a generic filename
-			# - Perform all checksums
-			GEOIP2_URLS=( \
-			"https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-ASN&license_key="$GEOIP2_LICENSE_KEY"&suffix=tar.gz" \
-			"https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key="$GEOIP2_LICENSE_KEY"&suffix=tar.gz" \
-			"https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key="$GEOIP2_LICENSE_KEY"&suffix=tar.gz" \
-			)
+			# - Download GeoLite2 databases using the license key
+			# - Keep the key out of argv and the log: curl reads the URL from
+			#   a mode-0600 config file instead of the command line
+			# - Verify every download against MaxMind's sha256
 			if [[ ! -d /opt/geoip ]]; then
-				for GEOIP2_URL in "${GEOIP2_URLS[@]}"; do
-					echo "=== FETCHING ==="
-					echo $GEOIP2_URL
-					wget -O sha256 "$GEOIP2_URL.sha256"
-					GEOIP2_FILENAME=$(cat sha256 | awk '{print $2}')
-					mv sha256 "$GEOIP2_FILENAME.sha256"
-					wget -O "$GEOIP2_FILENAME" "$GEOIP2_URL"
+				GEOIP2_CURLRC="$TEMP_INSTALL_DIR/modules/geoip-db/.curlrc-$$"
+				( umask 077; : > "$GEOIP2_CURLRC" ) || exit 1
+				for edition in GeoLite2-ASN GeoLite2-City GeoLite2-Country; do
+					echo "=== FETCHING ${edition} ==="
+					GEOIP2_URL="https://download.maxmind.com/app/geoip_download?edition_id=${edition}&license_key=${GEOIP2_LICENSE_KEY}&suffix=tar.gz"
+					printf 'url = "%s"\n' "${GEOIP2_URL}.sha256" > "$GEOIP2_CURLRC"
+					curl -fs --config "$GEOIP2_CURLRC" -o "${edition}.sha256.tmp" || {
+						echo "Failed to download the ${edition} checksum" >&2
+						exit 1
+					}
+					GEOIP2_FILENAME=$(awk '{print $2}' "${edition}.sha256.tmp")
+					[[ -n $GEOIP2_FILENAME ]] || {
+						echo "Empty ${edition} checksum file" >&2
+						exit 1
+					}
+					mv "${edition}.sha256.tmp" "$GEOIP2_FILENAME.sha256"
+					printf 'url = "%s"\n' "$GEOIP2_URL" > "$GEOIP2_CURLRC"
+					curl -fs --config "$GEOIP2_CURLRC" -o "$GEOIP2_FILENAME" || {
+						echo "Failed to download ${edition}" >&2
+						exit 1
+					}
 					echo "=== CHECKSUM ==="
-					sha256sum -c "$GEOIP2_FILENAME.sha256"
+					sha256sum -c "$GEOIP2_FILENAME.sha256" || exit 1
 				done
+				rm -f "$GEOIP2_CURLRC"
 				tar -xf GeoLite2-ASN_*.tar.gz
 				tar -xf GeoLite2-City_*.tar.gz
 				tar -xf GeoLite2-Country_*.tar.gz
@@ -934,29 +1055,22 @@ download_modules() {
 			else
 				echo -e "GeoLite2 database files exists... Skipping download"
 			fi
-			# Download GeoIP.conf for use with geoipupdate
+			# Write GeoIP.conf without putting the key in sed's argv
 			if [[ ! -f /usr/local/etc/GeoIP.conf ]]; then
-				cd /usr/local/etc || exit 1
-				tee GeoIP.conf <<'EOF'
-				# GeoIP.conf file for `geoipupdate` program, for versions >= 3.1.1.
-				# Used to update GeoIP databases from https://www.maxmind.com.
-				# For more information about this config file, visit the docs at
-				# https://dev.maxmind.com/geoip/updating-databases?lang=en.
-
-				# `AccountID` is from your MaxMind account.
-				AccountID YOUR_ACCOUNT_ID_HERE
-
-				# Replace YOUR_LICENSE_KEY_HERE with an active license key associated
-				# with your MaxMind account.
-				LicenseKey YOUR_LICENSE_KEY_HERE
-
-				# `EditionIDs` is from your MaxMind account.
-				EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country
-
-EOF
-				sed -i "s/YOUR_ACCOUNT_ID_HERE/${GEOIP2_ACCOUNT_ID}/g" GeoIP.conf
-				sed -i "s/YOUR_LICENSE_KEY_HERE/${GEOIP2_LICENSE_KEY}/g" GeoIP.conf
+				mkdir -p /usr/local/etc
+				(
+					umask 077
+					{
+						printf '%s\n' '# GeoIP.conf file for geoipupdate (>= 3.1.1).'
+						printf '%s\n' '# AccountID and LicenseKey are from your MaxMind account.'
+						printf 'AccountID %s\n' "$GEOIP2_ACCOUNT_ID"
+						printf 'LicenseKey %s\n' "$GEOIP2_LICENSE_KEY"
+						printf '%s\n' 'EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country'
+					} > /usr/local/etc/GeoIP.conf
+				)
+				chmod 600 /usr/local/etc/GeoIP.conf
 			else
+				chmod 600 /usr/local/etc/GeoIP.conf 2>/dev/null || true
 				echo -e "GeoIP.conf file exists... Skipping"
 			fi
 			if [[ ! -f /etc/cron.d/geoipupdate ]]; then
@@ -970,13 +1084,13 @@ EOF
 	# Cache Purge
 	if [[ $CACHEPURGE == 'y' ]]; then
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		git clone --depth 1 https://github.com/FRiCKLE/ngx_cache_purge
+		clone_pinned cachepurge https://github.com/FRiCKLE/ngx_cache_purge "$TEMP_INSTALL_DIR/modules/ngx_cache_purge" || exit 1
 	fi
 
 	# Nginx Substitutions Filter
 	if [[ $SUBFILTER == 'y' ]]; then
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		git clone https://github.com/yaoweibin/ngx_http_substitutions_filter_module
+		clone_pinned subfilter https://github.com/yaoweibin/ngx_http_substitutions_filter_module "$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module" || exit 1
 	fi
 
 	# Lua
@@ -1043,21 +1157,20 @@ EOF
 	# ModSecurity
 	if [[ $MODSEC == 'y' ]]; then
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		git clone --depth 1 -b v3/master --single-branch https://github.com/SpiderLabs/ModSecurity
-		cd ModSecurity || exit 1
-		git submodule init
-		git submodule update
+		clone_pinned modsecurity https://github.com/SpiderLabs/ModSecurity "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
+		cd "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
+		git submodule update --init --recursive --depth 1 || exit 1
 		./build.sh
 		./configure
 		make -j "$(nproc)"
 		make install
-		mkdir $INSTALL_DIR/modsec
-		wget -P $INSTALL_DIR/modsec/ https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended
-		mv $INSTALL_DIR/modsec/modsecurity.conf-recommended $INSTALL_DIR/modsec/modsecurity.conf
+		mkdir -p "$INSTALL_DIR/modsec"
+		download_verified "https://raw.githubusercontent.com/SpiderLabs/ModSecurity/${MODULE_PINS[modsecurity]}/modsecurity.conf-recommended" \
+			"$INSTALL_DIR/modsec/modsecurity.conf" "$MODSEC_CONF_SHA256" || exit 1
 
 		# Enable ModSecurity in Nginx
 		if [[ $MODSEC_ENABLE == 'y' ]]; then
-			sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' $INSTALL_DIR/modsec/modsecurity.conf
+			sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' "$INSTALL_DIR/modsec/modsecurity.conf"
 		fi
 	fi
 
@@ -1171,7 +1284,7 @@ EOF
 	fi
 
 	if [[ $FANCYINDEX == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/aperezdc/ngx-fancyindex.git "$TEMP_INSTALL_DIR"/modules/fancyindex
+		clone_pinned fancyindex https://github.com/aperezdc/ngx-fancyindex.git "$TEMP_INSTALL_DIR/modules/fancyindex" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/fancyindex
@@ -1179,7 +1292,7 @@ EOF
 	fi
 
 	if [[ $WEBDAV == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/arut/nginx-dav-ext-module.git "$TEMP_INSTALL_DIR"/modules/nginx-dav-ext-module
+		clone_pinned dav_ext https://github.com/arut/nginx-dav-ext-module.git "$TEMP_INSTALL_DIR/modules/nginx-dav-ext-module" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --with-http_dav_module --add-module="$TEMP_INSTALL_DIR"/modules/nginx-dav-ext-module
@@ -1187,7 +1300,7 @@ EOF
 	fi
 
 	if [[ $VTS == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/vozlt/nginx-module-vts.git "$TEMP_INSTALL_DIR"/modules/nginx-module-vts
+		clone_pinned vts https://github.com/vozlt/nginx-module-vts.git "$TEMP_INSTALL_DIR/modules/nginx-module-vts" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/nginx-module-vts
@@ -1195,7 +1308,7 @@ EOF
 	fi
 
 	if [[ $RTMP == 'y' ]]; then
-		git clone --quiet https://github.com/arut/nginx-rtmp-module.git "$TEMP_INSTALL_DIR"/modules/nginx-rtmp-module
+		clone_pinned rtmp https://github.com/arut/nginx-rtmp-module.git "$TEMP_INSTALL_DIR/modules/nginx-rtmp-module" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/nginx-rtmp-module
@@ -1203,7 +1316,7 @@ EOF
 	fi
 
 	if [[ $TESTCOOKIE == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/kyprizel/testcookie-nginx-module.git "$TEMP_INSTALL_DIR"/modules/testcookie-nginx-module
+		clone_pinned testcookie https://github.com/kyprizel/testcookie-nginx-module.git "$TEMP_INSTALL_DIR/modules/testcookie-nginx-module" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/testcookie-nginx-module
@@ -1211,7 +1324,7 @@ EOF
 	fi
 
 	if [[ $MODSEC == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/SpiderLabs/ModSecurity-nginx.git "$TEMP_INSTALL_DIR"/modules/ModSecurity-nginx
+		clone_pinned modsecurity_nginx https://github.com/SpiderLabs/ModSecurity-nginx.git "$TEMP_INSTALL_DIR/modules/ModSecurity-nginx" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/ModSecurity-nginx
@@ -1219,7 +1332,7 @@ EOF
 	fi
 
 	if [[ $REDIS2 == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/openresty/redis2-nginx-module.git "$TEMP_INSTALL_DIR"/modules/redis2-nginx-module
+		clone_pinned redis2 https://github.com/openresty/redis2-nginx-module.git "$TEMP_INSTALL_DIR/modules/redis2-nginx-module" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/redis2-nginx-module
@@ -1234,7 +1347,7 @@ EOF
 	fi
 
 	if [[ $SRCACHE == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/openresty/srcache-nginx-module.git "$TEMP_INSTALL_DIR"/modules/srcache-nginx-module
+		clone_pinned srcache https://github.com/openresty/srcache-nginx-module.git "$TEMP_INSTALL_DIR/modules/srcache-nginx-module" || exit 1
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
 			echo --add-module="$TEMP_INSTALL_DIR"/modules/srcache-nginx-module
@@ -1242,7 +1355,7 @@ EOF
 	fi
 
 	if [[ $SETMISC == 'y' ]]; then
-		git clone --depth 1 --quiet https://github.com/openresty/set-misc-nginx-module.git "$TEMP_INSTALL_DIR"/modules/set-misc-nginx-module
+		clone_pinned set_misc https://github.com/openresty/set-misc-nginx-module.git "$TEMP_INSTALL_DIR/modules/set-misc-nginx-module" || exit 1
 	if [[ $LUA == 'n' ]]; then
 		NGINX_MODULES=$(
 			echo "$NGINX_MODULES"
@@ -1271,27 +1384,49 @@ EOF
 
 	# Cloudflare's TLS Dynamic Record Resizing patch
 	if [[ $TLSDYN == 'y' ]]; then
-		wget https://raw.githubusercontent.com/nginx-modules/ngx_http_tls_dyn_size/master/nginx__dynamic_tls_records_1.17.7%2B.patch -O tcp-tls.patch
-		patch -p1 <tcp-tls.patch
+		download_verified "https://raw.githubusercontent.com/nginx-modules/ngx_http_tls_dyn_size/${TLSDYN_REV}/nginx__dynamic_tls_records_1.17.7%2B.patch" \
+			tcp-tls.patch "$TLSDYN_SHA256" || exit 1
+		patch -p1 < tcp-tls.patch || exit 1
 	fi
 
 	# HTTP3
 	if [[ $HTTP3 == 'y' ]]; then
 		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		git clone --depth 1 --recursive https://github.com/cloudflare/quiche
+		clone_pinned quiche https://github.com/cloudflare/quiche "$TEMP_INSTALL_DIR/modules/quiche" || exit 1
+		git -C "$TEMP_INSTALL_DIR/modules/quiche" submodule update --init --recursive --depth 1 || exit 1
 		# Dependencies for BoringSSL and Quiche
 		apt-get install -y golang
-		# Rust is not packaged so that's the only way...
-		curl -sSf https://sh.rustup.rs | sh -s -- -y
+		# Rust is not packaged at a new enough version, so use a pinned
+		# rustup-init binary and verify it before running.
+		case "$(uname -m)" in
+			x86_64)
+				rustup_arch=x86_64-unknown-linux-gnu
+				rustup_sha=$RUSTUP_X86_64_SHA256
+				;;
+			aarch64 | arm64)
+				rustup_arch=aarch64-unknown-linux-gnu
+				rustup_sha=$RUSTUP_AARCH64_SHA256
+				;;
+			*)
+				echo "Unsupported architecture for rustup: $(uname -m)" >&2
+				exit 1
+				;;
+		esac
+		download_verified "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_arch}/rustup-init" \
+			"$TEMP_INSTALL_DIR/rustup-init" "$rustup_sha" || exit 1
+		chmod 700 "$TEMP_INSTALL_DIR/rustup-init" || exit 1
+		"$TEMP_INSTALL_DIR/rustup-init" -y --profile minimal || exit 1
+		# shellcheck source=/dev/null
 		source "$HOME/.cargo/env"
 
 		cd "$TEMP_INSTALL_DIR"/nginx-${NGINX_VER} || exit 1
 		# Apply actual patch
-		patch -p01 <"$TEMP_INSTALL_DIR"/modules/quiche/nginx/nginx-1.16.patch
+		patch -p01 <"$TEMP_INSTALL_DIR"/modules/quiche/nginx/nginx-1.16.patch || exit 1
 
 		# Apply patch for nginx > 1.19.7 (source: https://github.com/cloudflare/quiche/issues/936#issuecomment-857618081)
-		wget https://raw.githubusercontent.com/angristan/nginx-autoinstall/master/patches/nginx-http3-1.19.7.patch -O nginx-http3.patch
-		patch -p01 <nginx-http3.patch
+		download_verified "https://raw.githubusercontent.com/angristan/nginx-autoinstall/${NGINX_AUTOINSTALL_REV}/patches/nginx-http3-1.19.7.patch" \
+			nginx-http3.patch "$HTTP3_PATCH_SHA256" || exit 1
+		patch -p01 < nginx-http3.patch || exit 1
 
 		NGINX_OPTIONS=$(
 			echo "$NGINX_OPTIONS"
@@ -1307,13 +1442,14 @@ EOF
 	if [[ $HPACK == 'y' ]]; then
 		if [[ $HTTP3 == 'n' ]]; then
 			# Working Patch from https://github.com/hakasenyang/openssl-patch/issues/2#issuecomment-413449809
-			wget https://raw.githubusercontent.com/hakasenyang/openssl-patch/master/nginx_hpack_push_1.15.3.patch -O nginx_http2_hpack.patch
-
+			download_verified "https://raw.githubusercontent.com/hakasenyang/openssl-patch/${OPENSSL_PATCH_REV}/nginx_hpack_push_1.15.3.patch" \
+				nginx_http2_hpack.patch "$HPACK_PATCH_SHA256" || exit 1
 		else
 			# Same patch as above but fixed conflicts with the HTTP/3 patch
-			wget https://raw.githubusercontent.com/angristan/nginx-autoinstall/master/patches/nginx_hpack_push_with_http3.patch -O nginx_http2_hpack.patch
+			download_verified "https://raw.githubusercontent.com/angristan/nginx-autoinstall/${NGINX_AUTOINSTALL_REV}/patches/nginx_hpack_push_with_http3.patch" \
+				nginx_http2_hpack.patch "$HPACK_HTTP3_PATCH_SHA256" || exit 1
 		fi
-		patch -p1 <nginx_http2_hpack.patch
+		patch -p1 < nginx_http2_hpack.patch || exit 1
 
 		NGINX_OPTIONS=$(
 			echo "$NGINX_OPTIONS"
@@ -1329,15 +1465,18 @@ configure() {
 }
 
 bad_bot_blocker() {
-	# Install Bad Bot Blocker
-		wget https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master/install-ngxblocker -O /usr/local/sbin/install-ngxblocker
-		chmod +x /usr/local/sbin/install-ngxblocker
-		cd /usr/local/sbin/ || exit 1
-		./install-ngxblocker -x
-		chmod +x /usr/local/sbin/setup-ngxblocker
-		chmod +x /usr/local/sbin/update-ngxblocker
-		cd /usr/local/sbin/ || exit 1
-		./setup-ngxblocker -x -e conf
+	local repo="https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/${BADBOT_REV}"
+	# Pin and verify the entry script; -r pins the files it downloads too.
+	download_verified "${repo}/install-ngxblocker" /usr/local/sbin/install-ngxblocker "$BADBOT_SHA256" || return 1
+	chmod 700 /usr/local/sbin/install-ngxblocker || return 1
+	cd /usr/local/sbin || return 1
+	./install-ngxblocker -x -r "$repo" || return 1
+	# setup-ngxblocker hardcodes master; pin this run to the same revision.
+	sed -i "s#https://raw.githubusercontent.com/mitchellkrogza/nginx-ultimate-bad-bot-blocker/master#${repo}#g" \
+		/usr/local/sbin/setup-ngxblocker || return 1
+	chmod 700 /usr/local/sbin/setup-ngxblocker /usr/local/sbin/update-ngxblocker || return 1
+	# update-ngxblocker intentionally tracks upstream for blocklist updates.
+	./setup-ngxblocker -x -e conf || return 1
 }
 
 install_nginx() {
@@ -1407,13 +1546,13 @@ install_nginx() {
   log_debug "Phase 2 of 6: Nginx source code download"
   printf "%s \\n" "${GREEN}▣${YELLOW}▣${CYAN}□□□□${NORMAL} Phase ${YELLOW}2${NORMAL} of ${GREEN}6${NORMAL}: Download Nginx source code"
   cd "$TEMP_INSTALL_DIR" || fatal "Could not enter build directory: $TEMP_INSTALL_DIR"
-  log_debug "Downloading Nginx source code (ref: $NGINX_GIT_REF)"
-  clone_cmd=$(printf 'git clone --depth 1 --branch %q https://github.com/nginx/nginx.git %q' \
-    "$NGINX_GIT_REF" "$TEMP_INSTALL_DIR/nginx-$NGINX_VER")
-  run_ok "$clone_cmd" "Downloading nginx $NGINX_GIT_REF..."
+  log_debug "Downloading Nginx ${NGINX_VER} source"
+  if ! fetch_nginx_source "$NGINX_VER" "$TEMP_INSTALL_DIR/nginx-$NGINX_VER"; then
+    fatal "Could not download or PGP-verify nginx ${NGINX_VER} source."
+  fi
   log_success "Download finished"
   echo
-  cd "nginx-$NGINX_VER" || fatal "nginx source directory is missing; ref $NGINX_GIT_REF may not exist."
+  cd "nginx-$NGINX_VER" || fatal "nginx source directory is missing: $TEMP_INSTALL_DIR/nginx-$NGINX_VER"
   log_debug "Phase 3 of 6: Nginx modules download"
   printf "%s \\n" "${GREEN}▣▣${YELLOW}▣${CYAN}□□□${NORMAL} Phase ${YELLOW}3${NORMAL} of ${GREEN}6${NORMAL}: Download Nginx modules"
   mkdir -p "$TEMP_INSTALL_DIR/modules" || fatal "Could not create module directory in $TEMP_INSTALL_DIR."
@@ -1436,6 +1575,7 @@ install_nginx() {
       run_ok "configure" "Running configuration..."
 			# Install default nginx server configuration
 			mkdir -p "$INSTALL_DIR/sites-available"
+			# shellcheck disable=SC2129
 			tee "$INSTALL_DIR/sites-available/default.conf" <<EOF >>"${RUN_LOG}" 2>&1
 server {
   listen 80 default_server;
@@ -1532,7 +1672,7 @@ EOF
 			  fatal "Empty NGINX_VERSION in ./src/core/nginx.h"
 			printf '%s\n' "$NGINX_BUILT_VER" > "$INSTALL_DIR/installed_version"
 			if [[ $NGINX_VER_NAME != "mainline" && $NGINX_BUILT_VER != "$NGINX_VER" ]]; then
-			  log_warning "Built nginx $NGINX_BUILT_VER but requested $NGINX_VER (ref $NGINX_GIT_REF)."
+			  log_warning "Built nginx $NGINX_BUILT_VER but requested $NGINX_VER."
 			fi
 			run_ok "nginx -t && systemctl restart nginx" "Restarting nginx..."
 			log_success "done"

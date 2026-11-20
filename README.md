@@ -69,13 +69,13 @@ su root
 ```
 - Latest release
   ```bash
-  curl -sSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh > nginx_installer.sh && \
+  curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh > nginx_installer.sh && \
   chmod +x nginx_installer.sh && \
   ./nginx_installer.sh
   ```
 - Master
   ```bash
-  curl -sSL https://github.com/tmiland/nginx-installer/raw/refs/heads/main/nginx_installer.sh > nginx_installer.sh && \
+  curl -fsSL https://github.com/tmiland/nginx-installer/raw/refs/heads/main/nginx_installer.sh > nginx_installer.sh && \
   chmod +x nginx_installer.sh && \
   ./nginx_installer.sh
   ```
@@ -84,7 +84,7 @@ To install this script:
   - Latest release
     ```bash
     mkdir -p /opt/nginx-installer && \
-      curl -sSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh > /opt/nginx-installer/nginx-installer.sh && \
+      curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh > /opt/nginx-installer/nginx-installer.sh && \
       chmod +x /opt/nginx-installer/nginx-installer.sh && \
       ln -s /opt/nginx-installer/nginx-installer.sh /usr/local/bin/nginx-installer && \
       nginx-installer
@@ -92,7 +92,7 @@ To install this script:
   - Master
     ```bash
     mkdir -p /opt/nginx-installer && \
-      curl -sSL https://github.com/tmiland/nginx-installer/raw/refs/heads/main/nginx_installer.sh > /opt/nginx-installer/nginx-installer.sh && \
+      curl -fsSL https://github.com/tmiland/nginx-installer/raw/refs/heads/main/nginx_installer.sh > /opt/nginx-installer/nginx-installer.sh && \
       chmod +x /opt/nginx-installer/nginx-installer.sh && \
       ln -s /opt/nginx-installer/nginx-installer.sh /usr/local/bin/nginx-installer && \
       nginx-installer
@@ -103,6 +103,8 @@ To install this script:
   - Debian 9 and later
 
   CI builds and uninstalls nginx on Debian 12/13 and Ubuntu 22.04/24.04; Mint 21.3 and LMDE 7 are checked for distro detection.
+
+  nginx source tarballs are PGP-verified against the pinned nginx.org signing keys; `src/slib.sh` and third-party modules are pinned and checksum-verified.
 
 #### Compile options With headless
 
