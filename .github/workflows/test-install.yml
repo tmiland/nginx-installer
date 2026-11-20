@@ -177,6 +177,7 @@ jobs:
       RTMP: "y"
       TESTCOOKIE: "y"
       REDIS2: "n"
+      HTTPREDIS: "y"
       SRCACHE: "y"
       SETMISC: "y"
       LUA: "y"
@@ -212,7 +213,7 @@ jobs:
           for m in headers-more fancyindex ngx_cache_purge substitutions_filter \
             nginx-module-vts echo-nginx-module zstd-nginx-module lua-nginx-module \
             set-misc-nginx-module srcache-nginx-module nginx-dav-ext-module \
-            nginx-rtmp-module testcookie-nginx-module; do
+            nginx-rtmp-module testcookie-nginx-module ngx_http_redis; do
             printf '%s\n' "$version_out" | grep -q -- "$m"
           done
           test "$(cat /etc/nginx/installed_version)" = "${NGINX_VERSION}"
