@@ -36,11 +36,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify the pinned slib URL serves SLIB_SHA256
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090,SC1091
           source <(grep -E '^(REPO_NAME|SLIB_REV|SLIB_SHA256|SLIB_URL)=' nginx_installer.sh)
           tmp=$(mktemp)
-          curl -fsSL "$SLIB_URL" -o "$tmp"
+          gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$REPO_NAME/contents/src/slib.sh?ref=$SLIB_REV" > "$tmp"
           echo "$SLIB_SHA256  $tmp" | sha256sum -c -
-          echo "pinned slib URL OK"
+          echo "pinned slib URL OK (GitHub API)"
