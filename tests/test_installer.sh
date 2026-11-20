@@ -469,6 +469,11 @@ else
   pass "rejects an unknown MODULES_PROFILE"
 fi
 
+same_version_reinstall() {
+  ( CURRENT_VER=1.30.7; NGINX_VER=1.30.7; chk_nginx )
+}
+assert_ok "allows an explicit reinstall of the same nginx version" same_version_reinstall
+
 if ( source ./nginx_installer.sh --nginx 1.30 >/dev/null 2>&1 ); then
   fail "rejects a two-part --nginx version"
 else

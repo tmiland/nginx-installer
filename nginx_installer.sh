@@ -555,9 +555,9 @@ chk_permissions() {
 }
 
 chk_nginx() {
-  # Check if kernel is installed, abort if same version is found
+  # An explicit rerun is the repair path; do not abort on the same version.
   if [ "$CURRENT_VER" = "${NGINX_VER}" ]; then
-    fatal "${RED}${BALLOT_X} nginx ${NGINX_VER} is already installed. Process aborted${NORMAL}"
+    log_warning "nginx ${NGINX_VER} is already installed; continuing with reinstall/repair."
   fi
 }
 
