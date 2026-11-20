@@ -275,6 +275,36 @@ assert_eq "mainline" "$(source_get NGINX_VER_NAME --mainline)" "--mainline selec
 assert_eq "1.30.7" "$(source_get NGINX_VER --nginx 1.30.7)" "--nginx takes an explicit version"
 assert_eq "1" "$(source_get DETECT_ONLY --detect)" "--detect is parsed"
 
+profile_modules() {
+  local profile=$1
+  (
+    export MODULES_PROFILE="$profile"
+    unset NGINX_MODULES
+    # shellcheck source=/dev/null
+    source ./nginx_installer.sh >/dev/null
+    printf '%s' "$NGINX_MODULES"
+  )
+}
+assert_contains "$(profile_modules minimal)" "--with-http_ssl_module" "minimal profile keeps TLS"
+assert_contains "$(profile_modules minimal)" "--with-http_v2_module" "minimal profile keeps HTTP/2"
+if [[ $(profile_modules minimal) == *"--with-http_perl_module"* ]]; then
+  fail "minimal profile excludes Perl"
+else
+  pass "minimal profile excludes Perl"
+fi
+if [[ $( (unset MODULES_PROFILE NGINX_MODULES; source ./nginx_installer.sh >/dev/null; printf '%s' "$NGINX_MODULES") ) == *"--with-http_perl_module"* ]]; then
+  fail "the default profile is minimal"
+else
+  pass "the default profile is minimal"
+fi
+assert_contains "$(profile_modules full)" "--with-http_perl_module" "full profile keeps Perl"
+assert_contains "$(profile_modules full)" "--with-stream" "full profile keeps stream"
+if ( MODULES_PROFILE=bogus; source ./nginx_installer.sh >/dev/null 2>&1 ); then
+  fail "rejects an unknown MODULES_PROFILE"
+else
+  pass "rejects an unknown MODULES_PROFILE"
+fi
+
 if ( source ./nginx_installer.sh --nginx 1.30 >/dev/null 2>&1 ); then
   fail "rejects a two-part --nginx version"
 else

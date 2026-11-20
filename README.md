@@ -30,6 +30,10 @@
 - Options / modules can be overridden, just like [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall) 
 - (This is the same option as extra modules option.)
 
+### Built-in module profile
+
+`MODULES_PROFILE=minimal` (default) builds only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support. `MODULES_PROFILE=full` restores the previous broad set: Perl, XSLT, mail, stream, DAV, FLV/MP4, HTTP/3, stub status, and the other optional modules. `NGINX_MODULES` still overrides both.
+
 ### Module sources
 
 Module sources come from a verified full bundle in [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) by default. The per-module flags above still select what gets compiled.

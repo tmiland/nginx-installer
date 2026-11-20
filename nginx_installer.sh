@@ -406,19 +406,19 @@ MODULES_SUMS_URL=${MODULES_SUMS_URL:-}
 MODULES_SKIP_BUNDLE=${MODULES_SKIP_BUNDLE:-0}
 
 # Define module versions
-LIBRESSL_VER=${LIBRESSL_VER:-4.1.0}
-OPENSSL_VER=${OPENSSL_VER:-3.5.1}
+LIBRESSL_VER=${LIBRESSL_VER:-4.4.1}
+OPENSSL_VER=${OPENSSL_VER:-3.5.9}
 NPS_VER=${NPS_VER:-1.13.35.2}
-HEADERMOD_VER=${HEADERMOD_VER:-0.39}
-LIBMAXMINDDB_VER=${LIBMAXMINDDB_VER:-1.12.2}
+HEADERMOD_VER=${HEADERMOD_VER:-0.42}
+LIBMAXMINDDB_VER=${LIBMAXMINDDB_VER:-1.14.1}
 GEOIP2_VER=${GEOIP2_VER:-3.4}
-LUA_JIT_VER=${LUA_JIT_VER:-2.1-20250529}
-LUA_NGINX_VER=${LUA_NGINX_VER:-0.10.28}
-LUA_RESTYCORE_VER=${LUA_RESTYCORE_VER:-0.1.31}
+LUA_JIT_VER=${LUA_JIT_VER:-2.1-20261117}
+LUA_NGINX_VER=${LUA_NGINX_VER:-0.10.31}
+LUA_RESTYCORE_VER=${LUA_RESTYCORE_VER:-0.1.32}
 LUA_RESTYLRUCACHE_VER=${LUA_RESTYLRUCACHE_VER:-0.15}
 NGINX_DEV_KIT=${NGINX_DEV_KIT:-0.3.4}
-HTTPREDIS_VER=${HTTPREDIS_VER:-0.3.9}
-NGXECHO_VER=${NGXECHO_VER:-0.63}
+HTTPREDIS_VER=${HTTPREDIS_VER:-0.4.2-build5}
+NGXECHO_VER=${NGXECHO_VER:-0.66}
 ZSTD_VER=${ZSTD_VER:-0.1.1}
 
 # Pinned revisions for git-based modules. Fetched by SHA, so a branch moving
@@ -814,6 +814,63 @@ done
 
 set -- "${POSITIONAL_ARGS[@]}" # restore positional parameters
 
+# Define default modules
+MODULES_PROFILE=${MODULES_PROFILE:-minimal}
+case "$MODULES_PROFILE" in
+  minimal)
+    DEFAULT_NGINX_MODULES="--with-threads \
+--with-file-aio \
+--with-http_ssl_module \
+--with-http_v2_module \
+--with-http_realip_module \
+--with-compat \
+--with-pcre \
+--with-pcre-jit"
+    ;;
+  full)
+    DEFAULT_NGINX_MODULES="--with-select_module \
+--with-poll_module \
+--with-threads \
+--with-file-aio \
+--with-http_ssl_module \
+--with-http_v2_module \
+--with-http_v3_module \
+--with-http_realip_module \
+--with-http_addition_module \
+--with-http_xslt_module \
+--with-http_sub_module \
+--with-http_dav_module \
+--with-http_flv_module \
+--with-http_mp4_module \
+--with-http_gunzip_module \
+--with-http_gzip_static_module \
+--with-http_auth_request_module \
+--with-http_random_index_module \
+--with-http_secure_link_module \
+--with-http_degradation_module \
+--with-http_slice_module \
+--with-http_stub_status_module \
+--with-http_perl_module \
+--with-mail \
+--with-mail_ssl_module \
+--without-mail_pop3_module \
+--without-mail_imap_module \
+--without-mail_smtp_module \
+--with-stream \
+--with-stream_ssl_module \
+--with-stream_realip_module \
+--with-stream_ssl_preread_module \
+--with-cpp_test_module \
+--with-compat \
+--with-pcre \
+--with-pcre-jit"
+    ;;
+  *)
+    fatal "Unknown MODULES_PROFILE: '$MODULES_PROFILE' (expected minimal or full)"
+    ;;
+esac
+NGINX_MODULES=${NGINX_MODULES:-$DEFAULT_NGINX_MODULES}
+
 # Allow the test suite to source the helpers and option parser without
 # running an install.
 if [[ ${NGINX_INSTALLER_LIB_ONLY:-0} == 1 ]]; then
@@ -996,43 +1053,6 @@ NGINX_OPTIONS=${NGINX_OPTIONS:-"
 --with-cc-opt=-Wno-deprecated-declarations \
 --with-cc-opt=-Wno-ignored-qualifiers"}
 
-# Define default modules
-NGINX_MODULES=${NGINX_MODULES:-"--with-select_module \
---with-poll_module \
---with-threads \
---with-file-aio \
---with-http_ssl_module \
---with-http_v2_module \
---with-http_v3_module \
---with-http_realip_module \
---with-http_addition_module \
---with-http_xslt_module \
---with-http_sub_module \
---with-http_dav_module \
---with-http_flv_module \
---with-http_mp4_module \
---with-http_gunzip_module \
---with-http_gzip_static_module \
---with-http_auth_request_module \
---with-http_random_index_module \
---with-http_secure_link_module \
---with-http_degradation_module \
---with-http_slice_module \
---with-http_stub_status_module \
---with-http_perl_module \
---with-mail \
---with-mail_ssl_module \
---without-mail_pop3_module \
---without-mail_imap_module \
---without-mail_smtp_module \
---with-stream \
---with-stream_ssl_module \
---with-stream_realip_module \
---with-stream_ssl_preread_module \
---with-cpp_test_module \
---with-compat \
---with-pcre \
---with-pcre-jit"}
 
 case $SSL in
 1 | SYSTEM)
@@ -1306,7 +1326,7 @@ download_modules() {
 	if [[ $HTTPREDIS == 'y' ]]; then
 		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_http_redis-${HTTPREDIS_VER}" ]]; then
 			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://people.freebsd.org/~osa/ngx_http_redis-${HTTPREDIS_VER}.tar.gz
+			wget -O "ngx_http_redis-${HTTPREDIS_VER}.tar.gz" "https://github.com/osokin/ngx_http_redis/archive/refs/tags/${HTTPREDIS_VER}.tar.gz"
 			tar xaf ngx_http_redis-${HTTPREDIS_VER}.tar.gz
 		fi
 	fi
