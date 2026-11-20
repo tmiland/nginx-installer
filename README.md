@@ -1,14 +1,35 @@
+<div align="center">
+
 # nginx-installer
 
-Automatic nginx install script.
+Build nginx from source with verified modules, selectable profiles, and GeoIP support.
 
-[![GitHub release](https://img.shields.io/github/release/tmiland/nginx-installer.svg?style=for-the-badge)](https://github.com/tmiland/nginx-installer/releases) [![licence](https://img.shields.io/github/license/tmiland/nginx-installer.svg?style=for-the-badge)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE) ![Bash](https://img.shields.io/badge/Language-SH-4EAA25.svg?style=for-the-badge)
+[![Latest release](https://img.shields.io/github/v/release/tmiland/nginx-installer?style=for-the-badge)](https://github.com/tmiland/nginx-installer/releases)
+[![License](https://img.shields.io/github/license/tmiland/nginx-installer?style=for-the-badge)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
+[![Bash](https://img.shields.io/badge/language-bash-4EAA25?style=for-the-badge&logo=gnu-bash&logoColor=white)](https://github.com/tmiland/nginx-installer)
+[![Tests](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/tmiland/nginx-installer/actions/workflows/tests.yml)
+[![Install matrix](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml/badge.svg?branch=main)](https://github.com/tmiland/nginx-installer/actions/workflows/test-install.yml)
+
+[Installation](#installation) · [Usage](#usage) · [Profiles](#built-in-module-profiles) · [Modules](#module-selection) · [GeoIP](#geoip-credentials) · [Requirements](#requirements)
+
+</div>
+
+## Why this installer
+
+- ✅ nginx source tarballs are PGP-verified against pinned nginx.org signing keys.
+- ✅ Third-party sources are pinned and checksum-verified from [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules).
+- ✅ Module dependencies resolve automatically; `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
+- ✅ Minimal and full built-in profiles; third-party modules by id or curated bundle.
+- ✅ GeoIP credentials stay in a mode-0600 env file instead of the process list.
+- ✅ CI builds on Debian 12/13 and Ubuntu 22.04/24.04.
 
 ## Installation
 
 Run the installer as root. The examples use `sudo`; omit it if you are already root.
 
-### Download the latest release
+### 1. Download
+
+Latest tested release:
 
 ```bash
 curl -fsSL https://github.com/tmiland/nginx-installer/releases/latest/download/nginx_installer.sh -o nginx_installer.sh
@@ -21,6 +42,15 @@ The `main` branch is available for development, but is not the tested release:
 curl -fsSL https://raw.githubusercontent.com/tmiland/nginx-installer/main/nginx_installer.sh -o nginx_installer.sh
 chmod +x nginx_installer.sh
 ```
+
+### 2. Choose a recipe
+
+| Recipe | `--profile` | `--modules` | Native HTTP/3 |
+|---|---|---|---|
+| Full module mainline | `full` | `all` | yes |
+| Minimal mainline | `minimal` | `all` | no |
+| Nginx only | `minimal` | none | no |
+| Stable default | `minimal` | none | no |
 
 ### Full module mainline install
 
@@ -35,7 +65,10 @@ sudo ./nginx_installer.sh -m \
   --dir /opt/nginx
 ```
 
-`-m` selects the latest mainline nginx. `all` includes `geoip2`, so the GeoIP credentials file is required. Remove `--bad-bot` if you do not want the blocker.
+`-m` selects the latest mainline nginx. Remove `--bad-bot` if you do not want the blocker.
+
+> [!NOTE]
+> `--modules "all"` includes `geoip2`, so the GeoIP credentials file is required.
 
 ### Minimal mainline install
 
@@ -66,7 +99,7 @@ With no arguments, the installer builds the latest stable nginx with the minimal
 sudo ./nginx_installer.sh
 ```
 
-### Install the script system-wide (optional)
+### 3. Optional: install the script system-wide
 
 ```bash
 sudo mkdir -p /opt/nginx-installer
@@ -105,19 +138,45 @@ Usage: nginx_installer.sh [options]
   --uninstall            |-u   uninstall nginx
 ```
 
-`--headless` sets the `SSL=1`, `RM_CONF=n`, and `RM_LOGS=n` defaults. It does not select modules or make the installer fully non-interactive.
+> [!NOTE]
+> `--headless` only sets the `SSL=1`, `RM_CONF=n`, and `RM_LOGS=n` defaults. It does not select modules or make the installer fully non-interactive.
 
-### Built-in module profile
+### Built-in module profiles
 
-`MODULES_PROFILE=minimal` (default) builds only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support. `MODULES_PROFILE=full` restores the previous broad set: Perl, XSLT, mail, stream, DAV, FLV/MP4, HTTP/3, stub status, and the other optional modules. `NGINX_MODULES` still overrides both.
+| Profile | What it builds |
+|---|---|
+| `minimal` (default) | TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support. |
+| `full` | Minimal plus select/poll, addition, XSLT, sub, DAV, FLV/MP4, gunzip, gzip static, auth request, random index, secure link, degradation, slice, stub status, Perl, mail, stream, HTTP/3, and the other optional modules. |
+
+`MODULES_PROFILE` selects the default. `NGINX_MODULES` overrides both profiles.
 
 ### Module selection
 
 Third-party modules are selected by id, not by per-module flags. The ids and their build steps live in `modules.conf` inside the verified [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) bundle; the bundle is the only module source. See that repository's README for the current id list.
 
-- `MODULES="headers-more,fancyindex,..."` or `--modules|-M <ids|bundles>` selects modules. `requires` are resolved recursively, so `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
-- `--modules web` or `--modules "web,lua"` expands the curated bundle names from the release (`core`, `web`, `security`, `observability`, `media`, `lua`, `all`; `http3` is legacy for nginx <= 1.24). `all` selects every active third-party module except the TLS alternatives (`openssl`, `libressl`), PageSpeed, and the legacy HTTP/3 stack. nginx 1.25+ builds HTTP/3 natively via `--profile full`. Bundle names and explicit ids can be mixed.
-- No `MODULES` means no bundle download and no third-party modules.
+```bash
+# Individual ids
+sudo ./nginx_installer.sh --modules "headers-more,zstd"
+
+# Curated bundles, or a mix of bundles and ids
+sudo ./nginx_installer.sh --modules "web,lua"
+sudo ./nginx_installer.sh --modules "lua,headers-more"
+
+# The full set
+sudo ./nginx_installer.sh --profile full --modules "all"
+```
+
+| Bundle | What it adds |
+|---|---|
+| `core` | Brotli, headers-more, fancyindex, cachepurge, subfilter. |
+| `web` | Core plus echo, set-misc, srcache, redis2, httpredis, vts, and ngx-devel-kit. |
+| `security` | ModSecurity, ModSecurity-nginx, testcookie. |
+| `observability` | vts. |
+| `media` | rtmp. |
+| `lua` | LuaJIT, ngx-devel-kit, lua-nginx, lua-resty-core, lua-resty-lrucache, set-misc. |
+| `http3` | Legacy stack for nginx <= 1.24: quiche, tlsdyn, http3, hpack-http3. |
+| `all` | Every active module except the TLS alternatives (`openssl`, `libressl`), PageSpeed, and the legacy HTTP/3 stack. |
+
 - `--modules-extra` is only a preset that appends `headers-more,fancyindex,cachepurge,subfilter,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd,openssl`.
 - `SSL=2`/`OPENSSL` appends `openssl`; `SSL=3`/`LIBRESSL` appends `libressl`; `SSL=1`/`SYSTEM` adds nothing.
 - The old module flags (`BROTLI`, `HEADERMOD`, `LUA`, `GEOIP`, `VTS`, `REDIS2`, `ZSTD`, `HTTP3`, `TLSDYN`, `HPACK`, and the rest) no longer exist and select nothing.
@@ -144,9 +203,11 @@ If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoi
 
 ## Requirements
 
-- Debian 9 or later, and Debian-family distributions including Ubuntu.
-- Root access.
-- Network access to nginx.org, GitHub, and the module sources.
+| Requirement | Details |
+|---|---|
+| OS | Debian 9 or later, and Debian-family distributions including Ubuntu. |
+| Access | Root. |
+| Network | nginx.org, GitHub, and the module sources. |
 
 CI builds and uninstalls nginx on Debian 12/13 and Ubuntu 22.04/24.04; Linux Mint 21.3 and LMDE 7 are checked for distro detection.
 
@@ -158,7 +219,7 @@ nginx source tarballs are PGP-verified against the pinned nginx.org signing keys
 nginx -V
 ```
 
-The configure arguments show the selected profile and every `--add-module`. The module list is the authoritative record of what was compiled.
+The configure arguments show the selected profile and every `--add-module`. That line is the authoritative record of what was compiled.
 
 ## Credits
 
@@ -173,5 +234,7 @@ The configure arguments show the selected profile and every `--add-module`. The 
 ***Use at own risk.***
 
 ## License
+
+[![MIT License Image](https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/MIT_logo.svg/220px-MIT_logo.svg.png)](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
 
 [MIT License](https://github.com/tmiland/nginx-installer/blob/main/LICENSE)
