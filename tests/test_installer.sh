@@ -111,6 +111,7 @@ assert_function load_modules_manifest
 assert_function resolve_modules
 assert_function module_build_args
 assert_function load_geoip_env_file
+assert_function geoip_default_env_file
 assert_function run_module_handler
 assert_function apply_module_patches
 assert_function modules_bundle_url
@@ -445,10 +446,30 @@ assert_eq "123456|fake-license-key" \
   "$( (
     export HOME="$WORK/geoip-home"
     GEOIP_ENV_FILE='' GEOIP2_ACCOUNT_ID='' GEOIP2_LICENSE_KEY=''
-    prepare_geoip_credentials
+    prepare_geoip_credentials >/dev/null 2>&1
     printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY"
   ) )" \
   "loads the default HOME GeoIP env file"
+mkdir -p "$WORK/sudo-home/.credentials" "$WORK/root-home" "$WORK/bin"
+cp "$WORK/credentials/geoip.env" "$WORK/sudo-home/.credentials/geoip.env"
+cat > "$WORK/bin/getent" <<EOF
+#!/bin/sh
+if [ "\$1" = passwd ] && [ "\$2" = fakeuser ]; then
+  printf '%s\n' 'fakeuser:x:1000:1000::$WORK/sudo-home:/bin/bash'
+  exit 0
+fi
+exit 2
+EOF
+chmod +x "$WORK/bin/getent"
+assert_eq "123456|fake-license-key" \
+  "$( (
+    export PATH="$WORK/bin:$PATH"
+    export HOME="$WORK/root-home" SUDO_USER=fakeuser
+    GEOIP_ENV_FILE='' GEOIP2_ACCOUNT_ID='' GEOIP2_LICENSE_KEY=''
+    prepare_geoip_credentials >/dev/null 2>&1
+    printf '%s|%s' "$GEOIP2_ACCOUNT_ID" "$GEOIP2_LICENSE_KEY"
+  ) )" \
+  "checks the sudo user's home for the GeoIP env file"
 if ( GEOIP_ENV_FILE="$WORK/credentials/geoip.env" GEOIP2_LICENSE_KEY=''; prepare_geoip_credentials ) >/dev/null 2>&1; then
   pass "loads GeoIP credentials from the env file"
 else

@@ -1020,13 +1020,31 @@ load_geoip_env_file() {
 	done < "$file"
 }
 
+# Resolve the default credentials file. Under sudo, HOME is the target
+# account's home, so prefer the invoking user's home before $HOME.
+geoip_default_env_file() {
+	local candidate sudo_home=
+	if [[ -n ${SUDO_USER:-} ]] && command -v getent >/dev/null 2>&1; then
+		sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+	fi
+	for candidate in "${sudo_home:+$sudo_home/.credentials/geoip.env}" \
+		"${HOME:-/root}/.credentials/geoip.env"; do
+		if [[ -n $candidate && -f $candidate ]]; then
+			printf '%s' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
 # geoip2 needs a MaxMind license key. Prefer the env file over the environment
 # so the key does not appear in the process list. Never log the value.
 prepare_geoip_credentials() {
-	if [[ -z $GEOIP_ENV_FILE && -f ${HOME:-/root}/.credentials/geoip.env ]]; then
-		GEOIP_ENV_FILE=${HOME:-/root}/.credentials/geoip.env
+	if [[ -z $GEOIP_ENV_FILE ]]; then
+		GEOIP_ENV_FILE=$(geoip_default_env_file) || GEOIP_ENV_FILE=
 	fi
 	if [[ -n $GEOIP_ENV_FILE ]]; then
+		log_info "Using GeoIP credentials file: $GEOIP_ENV_FILE"
 		load_geoip_env_file "$GEOIP_ENV_FILE" || return 1
 	fi
 	if [[ -z $GEOIP2_LICENSE_KEY ]]; then

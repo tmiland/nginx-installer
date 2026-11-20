@@ -65,7 +65,7 @@ GEOIP_ENV_FILE="$HOME/.credentials/geoip.env" \
 # or: ./nginx_installer.sh --modules geoip2 --geoip-env-file "$HOME/.credentials/geoip.env"
 ```
 
-If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoip.env` automatically.
+If `GEOIP_ENV_FILE` is unset, the installer also checks `$HOME/.credentials/geoip.env` automatically. Under `sudo` it checks the invoking user's home first (`$SUDO_USER`), then root's, so a file in your own home works without `-ge`.
 
 `--geoip-account-id` and `--geoip-license-key` also exist, but a key passed in argv is visible in `ps`; prefer the env file or environment variables. The file is parsed, not sourced: only the two keys above are accepted.
 
