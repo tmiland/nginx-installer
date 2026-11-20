@@ -1499,10 +1499,11 @@ install_nginx() {
 				export LUAJIT_INC=/usr/local/include/luajit-2.1
 			fi
       run_ok "configure" "Running configuration..."
-			# Install default nginx server configuration
-			mkdir -p "$INSTALL_DIR/sites-available"
-			# shellcheck disable=SC2129
-			tee "$INSTALL_DIR/sites-available/default.conf" <<EOF >>"${RUN_LOG}" 2>&1
+			# Install the default server config only when it does not exist.
+			if [[ ! -f "$INSTALL_DIR/sites-available/default.conf" ]]; then
+				mkdir -p "$INSTALL_DIR/sites-available"
+				# shellcheck disable=SC2129
+				tee "$INSTALL_DIR/sites-available/default.conf" <<EOF >>"${RUN_LOG}" 2>&1
 server {
   listen 80 default_server;
   listen [::]:80 default_server;
@@ -1514,6 +1515,9 @@ server {
   root  $INSTALL_DIR/html;
 }
 EOF
+			else
+				log_info "Keeping existing $INSTALL_DIR/sites-available/default.conf"
+			fi
 			# Install systemd configuration
 			tee /etc/systemd/system/nginx.service <<EOF >>"${RUN_LOG}" 2>&1
 [Unit]
