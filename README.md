@@ -30,6 +30,14 @@
 - Options / modules can be overridden, just like [nginx-autoinstall](https://github.com/angristan/nginx-autoinstall) 
 - (This is the same option as extra modules option.)
 
+### Module sources
+
+Module sources come from a verified full bundle in [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) by default. The per-module flags above still select what gets compiled.
+
+- `MODULES_REV=latest` (default) uses the latest tested bundle; set a release tag to pin it.
+- `MODULES_BUNDLE=full` (default) downloads all module sources once. Use a bundle name for a smaller preset once published.
+- `MODULES_SKIP_BUNDLE=1` falls back to per-module upstream downloads.
+
  ```bash
  HEADLESS=y \
  PAGESPEED=n \

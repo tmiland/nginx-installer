@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016,SC2030,SC2031
+# shellcheck disable=SC2016,SC2030,SC2031,SC2317
 # Unit tests for nginx_installer.sh. No install is performed: the script is
 # sourced with NGINX_INSTALLER_LIB_ONLY=1, which returns after option parsing.
 
@@ -107,6 +107,10 @@ assert_function download_verified
 assert_function load_slib
 assert_function clone_pinned
 assert_function fetch_nginx_source
+assert_function modules_selected
+assert_function modules_bundle_url
+assert_function fetch_modules_bundle
+assert_function load_module_versions
 
 # ---------------------------------------------------------------------------
 # Pinned dependencies and checksum helpers.
@@ -134,6 +138,58 @@ standalone_out=$(
   ) 2>/dev/null
 )
 assert_contains "$standalone_out" "DISTRO_GROUP=Debian" "standalone release path verifies the pinned slib"
+
+# ---------------------------------------------------------------------------
+# Module bundle fetch and version loading (file:// fixture, no network).
+# ---------------------------------------------------------------------------
+bundle_root="$WORK/fakebundle"
+mkdir -p "$bundle_root/full/modules/headers-more-nginx-module-0.39"
+printf 'HEADERMOD_VER=0.39\n' > "$bundle_root/full/versions.conf"
+tar -czf "$WORK/nginx-modules-full.tar.gz" -C "$bundle_root" full
+( cd "$WORK" && sha256sum nginx-modules-full.tar.gz > SHA256SUMS )
+
+bundle_result=$(
+  export TEMP_INSTALL_DIR="$WORK/bundle-extract"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export PATH=${PATH#"$WORK/bin:"}
+  export MODULES_BUNDLE_URL="file://$WORK/nginx-modules-full.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/SHA256SUMS"
+  fetch_modules_bundle >/dev/null 2>&1 || exit 1
+  load_module_versions || exit 1
+  printf '%s' "$HEADERMOD_VER"
+)
+assert_eq "0.39" "$bundle_result" "loads module versions from the bundle"
+if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.39" ]]; then
+  pass "extracts the module tree from the bundle"
+else
+  fail "extracts the module tree from the bundle"
+fi
+
+assert_contains "$(modules_bundle_url)" "/tmiland/nginx-modules/releases/latest/download/nginx-modules-full.tar.gz" "defaults to the latest full bundle"
+if (
+  export TEMP_INSTALL_DIR="$WORK/no-bundle"
+  mkdir -p "$TEMP_INSTALL_DIR"
+  export MODULES_BUNDLE_URL="file://$WORK/missing.tar.gz"
+  export MODULES_SUMS_URL="file://$WORK/missing.sums"
+  fetch_modules_bundle
+) >/dev/null 2>&1; then
+  fail "fails when the bundle is missing"
+else
+  pass "fails when the bundle is missing"
+fi
+
+if ( BROTLI=y; modules_selected ); then
+  pass "detects a selected module"
+else
+  fail "detects a selected module"
+fi
+if ( BROTLI=n; HEADERMOD=n; modules_selected ); then
+  fail "detects no selected modules"
+else
+  pass "detects no selected modules"
+fi
+assert_eq "y" "$( ( ZSTF=y; source ./nginx_installer.sh >/dev/null; printf '%s' "${ZSTD:-}" ) )" "accepts ZSTF as a ZSTD alias"
+
 
 assert_eq "14" "${#MODULE_PINS[@]}" "pins every git-based module"
 for name in brotli cachepurge subfilter modsecurity modsecurity_nginx fancyindex dav_ext vts rtmp testcookie redis2 srcache set_misc quiche; do
