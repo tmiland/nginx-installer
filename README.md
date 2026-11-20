@@ -120,6 +120,8 @@ To install this script:
 
 #### Compile options With headless
 
+The examples below use `MODULES_PROFILE=full`; the default minimal build includes only TLS, HTTP/2, real IP, threads, file AIO, PCRE, and compatibility support.
+
 ```bash
 nginx -V
 nginx version: nginx/1.28.0
