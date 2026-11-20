@@ -27,7 +27,7 @@ Build nginx from source with verified modules, selectable profiles, and GeoIP su
 
 ![Terminal demo: detect, install, nginx -V, and service status](docs/demo.svg)
 
-Static capture from a Debian 13 mainline install. Copy-paste commands are in [Installation](#installation).
+Illustrative terminal walkthrough from a Debian 13 mainline install. Copy-paste commands are in [Installation](#installation).
 
 ## Installation
 
