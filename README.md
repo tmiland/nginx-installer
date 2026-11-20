@@ -15,7 +15,7 @@
    --mainline             |-m   mainline nginx version (auto-detected)
    --detect               |-dt  detect the distro and exit
    --headless             |-hl  headless install
-   --modules              |-M   module ids to build from the bundle (comma separated)
+   --modules              |-M   module ids or bundle names (comma separated)
    --modules-extra        |-me  preset: append the common extra module ids
    --profile              |-p   built-in module profile: minimal or full
    --modules-rev          |-mr  nginx-modules release tag (default: latest)
@@ -40,7 +40,8 @@
 
 Third-party modules are selected by id, not by per-module flags. The ids and their build steps live in `modules.conf` inside the verified [`tmiland/nginx-modules`](https://github.com/tmiland/nginx-modules) bundle; the bundle is the only module source. See that repository's README for the current id list.
 
-- `MODULES="headers-more,fancyindex,..."` or `--modules|-M <ids>` selects ids. `requires` are resolved recursively, so `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
+- `MODULES="headers-more,fancyindex,..."` or `--modules|-M <ids|bundles>` selects modules. `requires` are resolved recursively, so `lua-nginx` pulls in `luajit2` and `ngx-devel-kit`.
+- `--modules web` or `--modules "web,lua"` expands the curated bundle names from the release (`core`, `web`, `security`, `observability`, `media`, `lua`, `http3`). Bundle names and explicit ids can be mixed.
 - No `MODULES` means no bundle download and no third-party modules.
 - `--modules-extra` is only a preset that appends `headers-more,fancyindex,cachepurge,subfilter,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd,openssl`.
 - `SSL=2`/`OPENSSL` appends `openssl`; `SSL=3`/`LIBRESSL` appends `libressl`; `SSL=1`/`SYSTEM` adds nothing.

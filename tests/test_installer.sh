@@ -160,6 +160,11 @@ set-misc|set-misc-nginx-module|git|--add-module={dir}|ngx-devel-kit|SETMISC
 zstd|zstd-nginx-module|archive|--add-module={dir}||ZSTD
 tlsdyn|patches/tlsdyn.patch|file|||TLSDYN
 EOF
+cat > "$bundle_root/full/bundles.conf" <<'EOF'
+# bundle|comma-separated module ids
+web|headers-more,zstd
+lua|lua-nginx,set-misc
+EOF
 tar -czf "$WORK/nginx-modules-full.tar.gz" -C "$bundle_root" full
 ( cd "$WORK" && sha256sum nginx-modules-full.tar.gz > SHA256SUMS )
 
@@ -174,10 +179,10 @@ bundle_result=$(
   printf '%s' "${MODULE_DIR[headers-more]}"
 )
 assert_eq "headers-more-nginx-module-0.42" "$bundle_result" "parses modules.conf from the bundle"
-if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" && -f "$WORK/bundle-extract/modules.conf" ]]; then
-  pass "extracts the module tree and manifest from the bundle"
+if [[ -d "$WORK/bundle-extract/modules/headers-more-nginx-module-0.42" && -f "$WORK/bundle-extract/modules.conf" && -f "$WORK/bundle-extract/bundles.conf" ]]; then
+  pass "extracts the module tree and manifests from the bundle"
 else
-  fail "extracts the module tree and manifest from the bundle"
+  fail "extracts the module tree and manifests from the bundle"
 fi
 
 # Load the extracted fixture manifest in a subshell and inspect the result.
@@ -185,6 +190,7 @@ manifest_resolved() {
   (
     export TEMP_INSTALL_DIR="$WORK/bundle-extract"
     load_modules_manifest || exit 1
+    load_bundles_manifest || exit 1
     resolve_modules "$@" || exit 1
     printf '%s' "${RESOLVED_MODULES[*]}"
   )
@@ -206,6 +212,12 @@ assert_eq "luajit2 ngx-devel-kit lua-nginx" \
 assert_eq "libmaxminddb geoip2" \
   "$(manifest_resolved geoip2)" \
   "resolves the geoip2 library dependency"
+assert_eq "headers-more zstd" \
+  "$(manifest_resolved web)" \
+  "expands a bundle name"
+assert_eq "luajit2 ngx-devel-kit lua-nginx set-misc" \
+  "$(manifest_resolved lua)" \
+  "expands a bundle and its dependencies"
 assert_eq "" \
   "$(manifest_args libmaxminddb)" \
   "library modules have no configure arguments"
@@ -371,6 +383,7 @@ fi
 
 # Module selection by id. The old module flags no longer exist.
 assert_eq "headers-more zstd" "$(source_get MODULES_LIST --modules headers-more,zstd)" "--modules takes comma separated ids"
+assert_eq "web" "$(source_get MODULES_LIST --modules web)" "--modules accepts a bundle name"
 assert_eq "headers-more zstd" "$(source_get MODULES_LIST -M "headers-more zstd")" "-M takes space separated ids"
 assert_eq "headers-more" "$(source_get MODULES_LIST --modules headers-more -M headers-more)" "--modules dedupes repeated ids"
 assert_eq "headers-more zstd" "$(MODULES='headers-more zstd' source_get MODULES_LIST)" "MODULES env selects ids"

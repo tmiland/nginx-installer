@@ -195,6 +195,7 @@ module_resolved() {
 # Parse the bundle's modules.conf into id -> fields tables. The file is data,
 # not shell: id|dir|kind|build|requires|env.
 declare -A MODULE_DIR=() MODULE_KIND=() MODULE_BUILD=() MODULE_REQUIRES=() MODULE_ENV=()
+declare -A BUNDLE_MODULES=()
 declare -a RESOLVED_MODULES=()
 declare -A RESOLVED_SEEN=() RESOLVING=()
 load_modules_manifest() {
@@ -219,6 +220,21 @@ load_modules_manifest() {
     MODULE_ENV[$id]=$env
   done < "$conf"
   ((${#MODULE_DIR[@]} > 0))
+}
+# Parse the optional bundles.conf (bundle|comma-separated module ids). Older
+# bundles may not have it; bundle names are simply unavailable then.
+load_bundles_manifest() {
+  local conf=$TEMP_INSTALL_DIR/bundles.conf line id modules
+  BUNDLE_MODULES=()
+  [[ -f $conf ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ -z $line || $line == \#* ]] && continue
+    IFS='|' read -r id modules <<< "$line"
+    [[ $id =~ ^[a-z0-9][a-z0-9-]*$ && -n $modules ]] || return 1
+    BUNDLE_MODULES[$id]=$modules
+  done < "$conf"
+  return 0
 }
 # Resolve ids and their recursive requires into RESOLVED_MODULES, dependencies
 # first. Unknown ids are rejected; a dependency cycle is a manifest error.
@@ -248,14 +264,24 @@ resolve_module_id() {
   log_debug "Selected module id=$id (kind=${MODULE_KIND[$id]}, env=${MODULE_ENV[$id]:-none})"
 }
 resolve_modules() {
-  local id
+  local token member
+  local -a members=()
   RESOLVED_MODULES=()
   RESOLVED_SEEN=()
   RESOLVING=()
   ((${#MODULE_DIR[@]} > 0)) || { log_error "Module manifest is not loaded."; return 1; }
-  for id in "$@"; do
-    [[ -n $id ]] || continue
-    resolve_module_id "$id" "" || return 1
+  for token in "$@"; do
+    [[ -n $token ]] || continue
+    if [[ -n ${BUNDLE_MODULES[$token]:-} ]]; then
+      IFS=',' read -r -a members <<< "${BUNDLE_MODULES[$token]}"
+      for member in "${members[@]}"; do
+        member=${member//[[:space:]]/}
+        [[ -n $member ]] || continue
+        resolve_module_id "$member" "$token" || return 1
+      done
+    else
+      resolve_module_id "$token" "" || return 1
+    fi
   done
 }
 # Build the configure arguments for a module from its manifest build field.
@@ -316,6 +342,9 @@ fetch_modules_bundle() {
   mkdir -p "$TEMP_INSTALL_DIR/modules" || { rm -rf "$tmp"; return 1; }
   cp -a "$src/modules/." "$TEMP_INSTALL_DIR/modules/" || { rm -rf "$tmp"; return 1; }
   cp -a "$src/modules.conf" "$TEMP_INSTALL_DIR/modules.conf" || { rm -rf "$tmp"; return 1; }
+  if [[ -f $src/bundles.conf ]]; then
+    cp -a "$src/bundles.conf" "$TEMP_INSTALL_DIR/bundles.conf" || { rm -rf "$tmp"; return 1; }
+  fi
   rm -rf "$tmp"
   log_info "Verified nginx-modules full bundle (${MODULES_REV})"
 }
@@ -733,7 +762,7 @@ usage() {
   printf "%s\\n" "  ${YELLOW}--mainline             |-m${NORMAL}   mainline nginx version ${YELLOW}$MAINLINE_VER${NORMAL}"
   printf "%s\\n" "  ${YELLOW}--detect               |-dt${NORMAL}  detect the distro and exit"
 	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
-	printf "%s\\n" "  ${YELLOW}--modules              |-M${NORMAL}   module ids to build from the bundle (comma separated)"
+	printf "%s\\n" "  ${YELLOW}--modules              |-M${NORMAL}   module ids or bundle names (comma separated)"
 	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  preset: append the common extra module ids"
 	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
 	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
@@ -1237,6 +1266,7 @@ download_modules() {
 
 	fetch_modules_bundle || { log_error "Could not download or verify the nginx-modules bundle (${MODULES_REV})."; return 1; }
 	load_modules_manifest || { log_error "Invalid or missing modules.conf in the nginx-modules bundle."; return 1; }
+	load_bundles_manifest || { log_error "Invalid bundles.conf in the nginx-modules bundle."; return 1; }
 	resolve_modules "${MODULE_ROOTS[@]}" || return 1
 
 	if module_resolved geoip2; then

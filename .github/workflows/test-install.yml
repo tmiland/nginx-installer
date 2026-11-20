@@ -170,11 +170,10 @@ jobs:
       image: debian:13
     env:
       TERM: xterm
-      HEADLESS: "y"
-      MODULES_PROFILE: ${{ matrix.profile }}
-      MODULES_REV: v2026.11.2
-      MODULES: "headers-more,fancyindex,cachepurge,subfilter,vts,webdav,rtmp,testcookie,httpredis,srcache,set-misc,lua-nginx,lua-resty-core,lua-resty-lrucache,echo,zstd"
+      PROFILE: ${{ matrix.profile }}
       NGINX_VERSION: ${{ github.event.inputs.nginx_version || '1.30.7' }}
+      # Bundle names and explicit ids can be mixed.
+      MODULE_SELECTION: "web,lua,media,testcookie,webdav,zstd"
     steps:
       - name: Install container prerequisites
         run: |
@@ -190,7 +189,7 @@ jobs:
           chmod +x /usr/local/bin/systemctl
           command -v systemctl
       - name: Build nginx with modules from nginx-modules
-        run: ./nginx_installer.sh --nginx "${NGINX_VERSION}"
+        run: ./nginx_installer.sh --headless --profile "$PROFILE" --modules "$MODULE_SELECTION" --modules-rev v2026.11.3 --nginx "${NGINX_VERSION}"
       - name: Show installer log on failure
         if: failure()
         run: |
