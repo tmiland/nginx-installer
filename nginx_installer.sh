@@ -1119,7 +1119,7 @@ download_pagespeed_psol() {
 # apply_module_patches applies quiche/nginx/nginx-1.16.patch.
 build_quiche_deps() {
 	local rustup_arch rustup_sha
-	apt-get install -y golang || return 1
+	apt-get install -y golang >>"${RUN_LOG}" 2>&1 || return 1
 	case "$(uname -m)" in
 		x86_64)
 			rustup_arch=x86_64-unknown-linux-gnu
@@ -1431,7 +1431,7 @@ install_nginx() {
       ${INSTALL} ${i} >>"${RUN_LOG}" 2>&1
     done
 		if module_selected modsecurity || module_selected modsecurity-nginx; then
-			apt-get install -y apt-utils libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libyajl-dev pkgconf
+			apt-get install -y apt-utils libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libyajl-dev pkgconf >>"${RUN_LOG}" 2>&1
 		fi
 
 		if module_selected geoip2; then
@@ -1447,11 +1447,11 @@ install_nginx() {
 			else
 				sed -i "s/main/main contrib/g" $sources_list
 			fi
-			apt-get update
-			apt-get install -y geoipupdate
+			apt-get update >>"${RUN_LOG}" 2>&1
+			apt-get install -y geoipupdate >>"${RUN_LOG}" 2>&1
 		fi
 		if module_selected zstd; then
-			apt-get install -y zstd
+			apt-get install -y zstd >>"${RUN_LOG}" 2>&1
 		fi
   fi
   log_success "Package Setup Finished"
