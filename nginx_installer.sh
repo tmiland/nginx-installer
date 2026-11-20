@@ -134,26 +134,6 @@ load_slib() {
   [[ -n $temp_file ]] && rm -f "$temp_file"
   return 0
 }
-# Clone a module at the exact revision recorded in MODULE_PINS. Fetching the
-# SHA directly works for older commits that are not in a shallow branch tip.
-clone_pinned() {
-  local name=${1:-} url=${2:-} dir=${3:-}
-  local rev=${MODULE_PINS[$name]:-} head
-  [[ -n $name && -n $url && -n $dir ]] || return 1
-  [[ $rev =~ ^[0-9a-f]{40}$ ]] || return 1
-  rm -rf -- "$dir" || return 1
-  mkdir -p -- "$dir" || return 1
-  git -C "$dir" init --quiet || return 1
-  git -C "$dir" remote add origin "$url" || return 1
-  if git -C "$dir" fetch --quiet --depth 1 origin "$rev"; then
-    git -C "$dir" checkout --quiet FETCH_HEAD || return 1
-  else
-    git -C "$dir" fetch --quiet origin || return 1
-    git -C "$dir" checkout --quiet "$rev" || return 1
-  fi
-  head=$(git -C "$dir" rev-parse HEAD) || return 1
-  [[ $head == "$rev" ]] || { echo "pinned revision mismatch for $name" >&2; return 1; }
-}
 # Download the nginx release tarball and verify its PGP signature against the
 # pinned nginx.org signing keys before extracting it.
 fetch_nginx_source() {
@@ -185,15 +165,114 @@ fetch_nginx_source() {
   rm -rf -- "$tmp"
   log_info "Verified nginx ${version} source (PGP)"
 }
-# True when at least one source module is selected.
-modules_selected() {
-  local flag
-  for flag in PAGESPEED BROTLI HEADERMOD GEOIP FANCYINDEX CACHEPURGE SUBFILTER \
-    LUA WEBDAV VTS RTMP TESTCOOKIE REDIS2 HTTPREDIS SRCACHE SETMISC NGXECHO \
-    ZSTD MODSEC HTTP3 TLSDYN HPACK; do
-    [[ ${!flag:-n} == y ]] && return 0
+# Normalize a comma/space separated module id list: drop blanks and
+# duplicates while keeping the first-seen order.
+normalize_module_ids() {
+  local raw=${1:-} id out="" IFS=', '
+  local -a tokens=()
+  local -A seen=()
+  read -r -a tokens <<< "$raw"
+  for id in "${tokens[@]}"; do
+    [[ -n $id && -z ${seen[$id]:-} ]] || continue
+    seen[$id]=1
+    out=${out:+$out }$id
+  done
+  printf '%s' "$out"
+}
+# True when the user selected this module id (requires are not included).
+module_selected() {
+  local id=${1:-} selected
+  for selected in "${MODULE_ROOTS[@]}"; do
+    [[ $selected == "$id" ]] && return 0
   done
   return 1
+}
+# True when this module id survived dependency resolution.
+module_resolved() {
+  local id=${1:-}
+  [[ -n $id && -n ${RESOLVED_SEEN[$id]:-} ]]
+}
+# Parse the bundle's modules.conf into id -> fields tables. The file is data,
+# not shell: id|dir|kind|build|requires|env.
+declare -A MODULE_DIR=() MODULE_KIND=() MODULE_BUILD=() MODULE_REQUIRES=() MODULE_ENV=()
+declare -a RESOLVED_MODULES=()
+declare -A RESOLVED_SEEN=() RESOLVING=()
+load_modules_manifest() {
+  local conf=$TEMP_INSTALL_DIR/modules.conf line id dir kind build requires env
+  [[ -f $conf ]] || return 1
+  MODULE_DIR=() MODULE_KIND=() MODULE_BUILD=() MODULE_REQUIRES=() MODULE_ENV=()
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ -z $line || $line == \#* ]] && continue
+    IFS='|' read -r id dir kind build requires env <<< "$line"
+    [[ $id =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    [[ -n $dir && $dir != /* && $dir != *..* ]] || return 1
+    [[ -z ${MODULE_DIR[$id]:-} ]] || return 1
+    case $kind in
+      git | archive | zip | file) ;;
+      *) return 1 ;;
+    esac
+    MODULE_DIR[$id]=$dir
+    MODULE_KIND[$id]=$kind
+    MODULE_BUILD[$id]=$build
+    MODULE_REQUIRES[$id]=$requires
+    MODULE_ENV[$id]=$env
+  done < "$conf"
+  ((${#MODULE_DIR[@]} > 0))
+}
+# Resolve ids and their recursive requires into RESOLVED_MODULES, dependencies
+# first. Unknown ids are rejected; a dependency cycle is a manifest error.
+resolve_module_id() {
+  local id=${1:-} parent=${2:-} dep
+  local -a deps=()
+  if [[ -z ${MODULE_DIR[$id]:-} ]]; then
+    if [[ -n $parent ]]; then
+      log_error "Unknown module id '$id' (required by '$parent')."
+    else
+      log_error "Unknown module id '$id'; see modules.conf in nginx-modules."
+    fi
+    return 1
+  fi
+  [[ -z ${RESOLVED_SEEN[$id]:-} ]] || return 0
+  [[ -z ${RESOLVING[$id]:-} ]] || { log_error "Module dependency cycle at '$id'."; return 1; }
+  RESOLVING[$id]=1
+  IFS=',' read -r -a deps <<< "${MODULE_REQUIRES[$id]:-}"
+  for dep in "${deps[@]}"; do
+    dep=${dep//[[:space:]]/}
+    [[ -n $dep ]] || continue
+    resolve_module_id "$dep" "$id" || return 1
+  done
+  unset 'RESOLVING[$id]'
+  RESOLVED_SEEN[$id]=1
+  RESOLVED_MODULES+=("$id")
+  log_debug "Selected module id=$id (kind=${MODULE_KIND[$id]}, env=${MODULE_ENV[$id]:-none})"
+}
+resolve_modules() {
+  local id
+  RESOLVED_MODULES=()
+  RESOLVED_SEEN=()
+  RESOLVING=()
+  ((${#MODULE_DIR[@]} > 0)) || { log_error "Module manifest is not loaded."; return 1; }
+  for id in "$@"; do
+    [[ -n $id ]] || continue
+    resolve_module_id "$id" "" || return 1
+  done
+}
+# Build the configure arguments for a module from its manifest build field.
+module_build_args() {
+  local id=${1:-} dir args
+  [[ -n $id && -n ${MODULE_DIR[$id]:-} ]] || return 1
+  dir=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[$id]}
+  args=${MODULE_BUILD[$id]:-}
+  [[ -n $args ]] || return 0
+  printf '%s' "${args//\{dir\}/$dir}"
+}
+append_module_build_args() {
+  local id args
+  for id in "${RESOLVED_MODULES[@]}"; do
+    args=$(module_build_args "$id") || return 1
+    [[ -n $args ]] && NGINX_MODULES="$NGINX_MODULES $args"
+  done
 }
 # Resolve the release asset for the selected module bundle.
 modules_bundle_url() {
@@ -210,12 +289,11 @@ modules_bundle_url() {
   fi
   printf '%s/nginx-modules-%s.tar.gz' "$base" "$MODULES_BUNDLE"
 }
-# Download and verify the full module source bundle, then extract it into
-# $TEMP_INSTALL_DIR/modules. The bundle is the primary source; per-module
-# downloads remain only as a fallback for modules missing from it.
+# Download and verify the full module source bundle, then extract its module
+# tree and manifest into $TEMP_INSTALL_DIR. The bundle is the only module
+# source; there is no per-module upstream fallback.
 fetch_modules_bundle() {
   local url sums tmp archive extract src
-  [[ $MODULES_SKIP_BUNDLE == 1 ]] && return 0
   url=$(modules_bundle_url) || return 1
   sums=${MODULES_SUMS_URL:-$(dirname -- "$url")/SHA256SUMS}
   tmp=$(mktemp -d "$TEMP_INSTALL_DIR/modules-download.XXXXXX") || return 1
@@ -237,29 +315,9 @@ fetch_modules_bundle() {
   [[ -n ${src:-} && -d $src/modules ]] || { rm -rf "$tmp"; return 1; }
   mkdir -p "$TEMP_INSTALL_DIR/modules" || { rm -rf "$tmp"; return 1; }
   cp -a "$src/modules/." "$TEMP_INSTALL_DIR/modules/" || { rm -rf "$tmp"; return 1; }
-  cp -a "$src/versions.conf" "$TEMP_INSTALL_DIR/versions.conf" || { rm -rf "$tmp"; return 1; }
+  cp -a "$src/modules.conf" "$TEMP_INSTALL_DIR/modules.conf" || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
   log_info "Verified nginx-modules ${MODULES_BUNDLE} bundle (${MODULES_REV})"
-}
-# Load module versions from the verified bundle without sourcing it.
-load_module_versions() {
-  local conf=$TEMP_INSTALL_DIR/versions.conf line key value
-  [[ -f $conf ]] || return 1
-  while IFS= read -r line; do
-    line=${line%$'\r'}
-    [[ -z $line || $line == \#* ]] && continue
-    key=${line%%=*}
-    value=${line#*=}
-    case "$key" in
-      NPS_VER|HEADERMOD_VER|LIBMAXMINDDB_VER|GEOIP2_VER|LUA_JIT_VER|LUA_NGINX_VER|LUA_RESTYCORE_VER|LUA_RESTYLRUACHE_VER|NGINX_DEV_KIT|HTTPREDIS_VER|NGXECHO_VER|ZSTD_VER|OPENSSL_VER|LIBRESSL_VER)
-        printf -v "$key" '%s' "$value"
-        ;;
-      *)
-        log_warning "Unknown module version key in bundle: $key"
-        return 1
-        ;;
-    esac
-  done < "$conf"
 }
 # Refuse build directories that could destroy the system when wiped.
 validate_build_dir() {
@@ -396,64 +454,30 @@ SLIB_REV=595e489b7a6e4d6662333608d4056b519a75272a
 SLIB_SHA256=b59fe3a9ede69a7e58af2c395b7cc7d655f96346a365abdd21f8471cce0ed036
 SLIB_URL=${SLIB_URL:-https://raw.githubusercontent.com/$REPO_NAME/$SLIB_REV/src/slib.sh}
 
-# Module source bundle. Full is the default; individual module flags still
-# decide what gets compiled.
+# Module source bundle. `modules.conf` inside the verified bundle decides the
+# build flags and special build steps for the ids in MODULES.
 MODULES_REPO=${MODULES_REPO:-tmiland/nginx-modules}
 MODULES_REV=${MODULES_REV:-latest}
 MODULES_BUNDLE=${MODULES_BUNDLE:-full}
 MODULES_BUNDLE_URL=${MODULES_BUNDLE_URL:-}
 MODULES_SUMS_URL=${MODULES_SUMS_URL:-}
-MODULES_SKIP_BUNDLE=${MODULES_SKIP_BUNDLE:-0}
 
-# Define module versions
-LIBRESSL_VER=${LIBRESSL_VER:-4.4.1}
-OPENSSL_VER=${OPENSSL_VER:-3.5.9}
-NPS_VER=${NPS_VER:-1.13.35.2}
-HEADERMOD_VER=${HEADERMOD_VER:-0.42}
-LIBMAXMINDDB_VER=${LIBMAXMINDDB_VER:-1.14.1}
-GEOIP2_VER=${GEOIP2_VER:-3.4}
-LUA_JIT_VER=${LUA_JIT_VER:-2.1-20261117}
-LUA_NGINX_VER=${LUA_NGINX_VER:-0.10.31}
-LUA_RESTYCORE_VER=${LUA_RESTYCORE_VER:-0.1.32}
-LUA_RESTYLRUCACHE_VER=${LUA_RESTYLRUCACHE_VER:-0.15}
-NGINX_DEV_KIT=${NGINX_DEV_KIT:-0.3.4}
-HTTPREDIS_VER=${HTTPREDIS_VER:-0.4.2-build5}
-NGXECHO_VER=${NGXECHO_VER:-0.66}
-ZSTD_VER=${ZSTD_VER:-0.1.1}
+# Comma/space separated module ids from the bundle's modules.conf.
+MODULES=${MODULES:-}
+# GeoIP credentials for the geoip2 module. Prefer an env file over argv.
+GEOIP_ENV_FILE=${GEOIP_ENV_FILE:-}
+GEOIP2_ACCOUNT_ID=${GEOIP2_ACCOUNT_ID:-}
+GEOIP2_LICENSE_KEY=${GEOIP2_LICENSE_KEY:-}
+# The MaxMind credentials are used only in this shell; keep them out of the
+# environment of child processes.
+export -n GEOIP2_ACCOUNT_ID GEOIP2_LICENSE_KEY 2>/dev/null || true
 
-# Pinned revisions for git-based modules. Fetched by SHA, so a branch moving
-# upstream cannot change what this script builds.
-declare -A MODULE_PINS=(
-	[brotli]=25f86f0bac1101b6512135eac5f93c49c63609e3
-	[cachepurge]=331fe43e8d9a3d1fa5e0c9fec7d3201d431a9177
-	[subfilter]=e12e965ac1837ca709709f9a26f572a54d83430e
-	[modsecurity]=475aece84b0823a4318cf31c558a9584d660dc47
-	[modsecurity_nginx]=30a4747a170ad26848ae5112f4c0f8b7ad94156c
-	[fancyindex]=70311f239ec1e88ff79c669d126d08532ddb8554
-	[dav_ext]=f5e30888a256136d9c550bf1ada77d6ea78a48af
-	[vts]=3b9235819e4a8bdadd30fbb70434b07d20c33248
-	[rtmp]=6c7719d0ba32e00b563ec70bd43dad11960fa9c4
-	[testcookie]=de7ca883344ff154f6c9cebc7289a54039e238d3
-	[redis2]=0e7f942deae4cd3e85c8891fa30a815df9659e82
-	[srcache]=3febcaa6d6e222047173c9701d855598141b3aab
-	[set_misc]=4a4e2ce09ac8a6505a58ef8a2265ff42a87a0c9d
-	[quiche]=d448b6b239652b09e81c8dde883b98cd5827c31f
-)
-
-# Pinned scripts, patches, and nginx signing keys.
+# Pinned scripts and nginx signing keys.
 BADBOT_REV=de661720daf023c6d4d840c7216d608c23dac445
 BADBOT_SHA256=92db080637ec21883f608abd0a512678780a267c3d56f3e683b641ad11079aea
-TLSDYN_REV=afb50796c16a2a8cdebfdd86ebb8806b05db3a35
-TLSDYN_SHA256=edf627dd38f8092f81703226ef17d7ad11f5c1aeabe2bd64686bac7ad6b79094
-NGINX_AUTOINSTALL_REV=da89d6c05ae1f456f4529aad5a6085a633f108ff
-HTTP3_PATCH_SHA256=b9f14740113a550bb7b05a0f082446ecc654b04d68714b0f544b7a201845e591
-HPACK_HTTP3_PATCH_SHA256=6cf3c61d749a17ffdfd5c85dbd914757af7d265845796cb9fc1b8da824fa5361
-OPENSSL_PATCH_REV=c48a1f85a70c649364bb82daca13dc14a14df8c1
-HPACK_PATCH_SHA256=452d20ffeda8eecca5f3338838cb907b38b2e1b0674568665b51101d834b60f3
 RUSTUP_VERSION=1.27.1
 RUSTUP_X86_64_SHA256=6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d
 RUSTUP_AARCH64_SHA256=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2
-MODSEC_CONF_SHA256=a4b9bed9b27e9be225b76d3965b4237416aba62432c9824aca431dbac4e72f43
 NGINX_SIGNING_KEY_IDS="43387825DDB1BB97EC36BA5D007C8D7C15D87369 8540A6F18833A80E9C1653A42FD21310B49F6B46 D6786CE303D9A9022998DC6CC8464D549AF75C0A 7338973069ED3F443F4D37DFA64FD5B17ADB39A8 13C82A63B603576156E30A4EA0EA981B66B0D967"
 NGINX_SIGNING_KEYS=(
 	"https://nginx.org/keys/arut.key|43387825DDB1BB97EC36BA5D007C8D7C15D87369"
@@ -710,10 +734,14 @@ usage() {
   printf "%s\\n" "  ${YELLOW}--mainline             |-m${NORMAL}   mainline nginx version ${YELLOW}$MAINLINE_VER${NORMAL}"
   printf "%s\\n" "  ${YELLOW}--detect               |-dt${NORMAL}  detect the distro and exit"
 	printf "%s\\n" "  ${YELLOW}--headless             |-hl${NORMAL}  headless install"
-	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  extra modules"
+	printf "%s\\n" "  ${YELLOW}--modules              |-M${NORMAL}   module ids to build from the bundle (comma separated)"
+	printf "%s\\n" "  ${YELLOW}--modules-extra        |-me${NORMAL}  preset: append the common extra module ids"
 	printf "%s\\n" "  ${YELLOW}--profile              |-p${NORMAL}   built-in module profile: minimal or full"
 	printf "%s\\n" "  ${YELLOW}--modules-bundle       |-mb${NORMAL}  module source bundle (default: full)"
 	printf "%s\\n" "  ${YELLOW}--modules-rev          |-mr${NORMAL}  nginx-modules release tag (default: latest)"
+	printf "%s\\n" "  ${YELLOW}--geoip-account-id     ${NORMAL}      MaxMind account id for geoip2"
+	printf "%s\\n" "  ${YELLOW}--geoip-license-key    ${NORMAL}      MaxMind license key for geoip2 (visible in ps)"
+	printf "%s\\n" "  ${YELLOW}--geoip-env-file       ${NORMAL}      file with GEOIP2_ACCOUNT_ID and GEOIP2_LICENSE_KEY"
 	printf "%s\\n" "  ${YELLOW}--bad-bot              |-bb${NORMAL}  install the bad bot blocker"
   printf "%s\\n" "  ${YELLOW}--dir                  |-d${NORMAL}   temporary build directory"
   printf "%s\\n" "  ${YELLOW}--verbose              |-v${NORMAL}   increase verbosity"
@@ -766,9 +794,29 @@ while [[ $# -gt 0 ]]; do
 			shift
 			HEADLESS=y
 			;;
+		--modules | -M)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --modules requires module ids (comma separated)."
+			MODULES=${MODULES:+$MODULES,}$2
+			shift 2
+			;;
 		--modules-extra | -me)
 			shift
 			MODULES_EXTRA=y
+			;;
+		--geoip-account-id)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --geoip-account-id requires a value."
+			GEOIP2_ACCOUNT_ID=$2
+			shift 2
+			;;
+		--geoip-license-key)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --geoip-license-key requires a value."
+			GEOIP2_LICENSE_KEY=$2
+			shift 2
+			;;
+		--geoip-env-file)
+			[[ -n ${2:-} && $2 != -* ]] || fatal "Option --geoip-env-file requires a path."
+			GEOIP_ENV_FILE=$2
+			shift 2
 			;;
 		--profile | -p)
 			case "${2:-}" in
@@ -835,6 +883,13 @@ done
 
 set -- "${POSITIONAL_ARGS[@]}" # restore positional parameters
 
+# Define installation parameters for headless install (fallback if unspecified)
+if [[ $HEADLESS == 'y' ]]; then
+	SSL=${SSL:-1}
+	RM_CONF=${RM_CONF:-n}
+	RM_LOGS=${RM_LOGS:-n}
+fi
+
 # Define default modules
 MODULES_PROFILE=${MODULES_PROFILE:-minimal}
 case "$MODULES_PROFILE" in
@@ -892,6 +947,321 @@ case "$MODULES_PROFILE" in
 esac
 NGINX_MODULES=${NGINX_MODULES:-$DEFAULT_NGINX_MODULES}
 
+# TLS selection stays backward compatible: it only appends a module id.
+case $SSL in
+1 | SYSTEM)
+	;;
+
+2 | OPENSSL)
+	MODULES="$MODULES,openssl"
+	;;
+
+3 | LIBRESSL)
+	MODULES="$MODULES,libressl"
+	;;
+*)
+	;;
+esac
+
+# --modules-extra is only a preset: it appends ids to the selection.
+if [[ $MODULES_EXTRA == 'y' ]]; then
+	MODULES="$MODULES,headers-more,fancyindex,cachepurge,subfilter,webdav,vts,rtmp,testcookie,redis2,srcache,set-misc,echo,zstd,openssl"
+fi
+
+# MODULE_ROOTS is the user selection; requires are resolved from the bundle
+# manifest once it has been downloaded.
+MODULES_LIST=$(normalize_module_ids "$MODULES")
+read -r -a MODULE_ROOTS <<< "$MODULES_LIST"
+
+# Load GeoIP credentials from KEY=VALUE lines without sourcing the file. Only
+# the two MaxMind keys are accepted; values may be quoted.
+load_geoip_env_file() {
+	local file=${1:-} line key value
+	[[ -n $file ]] || return 0
+	[[ -f $file ]] || { log_error "GeoIP env file not found: $file"; return 1; }
+	while IFS= read -r line || [[ -n $line ]]; do
+		line=${line%$'\r'}
+		[[ -z $line || $line == \#* ]] && continue
+		key=${line%%=*}
+		[[ $key != "$line" ]] || { log_error "Invalid line in GeoIP env file: $file"; return 1; }
+		value=${line#*=}
+		case $value in
+			\"*\" | \'*\')
+				((${#value} >= 2)) && value=${value:1:${#value}-2}
+				;;
+		esac
+		case $key in
+			GEOIP2_ACCOUNT_ID) GEOIP2_ACCOUNT_ID=$value ;;
+			GEOIP2_LICENSE_KEY) GEOIP2_LICENSE_KEY=$value ;;
+			*) log_error "Unknown key in GeoIP env file: $key"; return 1 ;;
+		esac
+	done < "$file"
+}
+
+# geoip2 needs a MaxMind license key. Prefer the env file over the environment
+# so the key does not appear in the process list. Never log the value.
+prepare_geoip_credentials() {
+	if [[ -z $GEOIP_ENV_FILE && -f ${HOME:-/root}/.credentials/geoip.env ]]; then
+		GEOIP_ENV_FILE=${HOME:-/root}/.credentials/geoip.env
+	fi
+	if [[ -n $GEOIP_ENV_FILE ]]; then
+		load_geoip_env_file "$GEOIP_ENV_FILE" || return 1
+	fi
+	if [[ -z $GEOIP2_LICENSE_KEY ]]; then
+		log_error "geoip2 requires GeoIP credentials."
+		log_error "Pass --geoip-env-file <path> (or set GEOIP_ENV_FILE) to a file containing"
+		log_error "GEOIP2_ACCOUNT_ID=... and GEOIP2_LICENSE_KEY=..., or set both in the environment."
+		return 1
+	fi
+}
+
+# Download and verify the GeoLite2 databases, then write geoipupdate configs.
+# The license key is only written to mode-0600 files, never to argv or the log.
+download_geoip_databases() {
+	local dbdir=$TEMP_INSTALL_DIR/modules/geoip-db
+	local edition rcfile url filename
+	mkdir -p "$dbdir" || return 1
+	(
+		cd "$dbdir" || exit 1
+		if [[ ! -d /opt/geoip ]]; then
+			rcfile=.curlrc-$$
+			( umask 077; : > "$rcfile" ) || exit 1
+			trap 'rm -f "$rcfile"' EXIT
+			for edition in GeoLite2-ASN GeoLite2-City GeoLite2-Country; do
+				echo "=== FETCHING ${edition} ==="
+				url="https://download.maxmind.com/app/geoip_download?edition_id=${edition}&license_key=${GEOIP2_LICENSE_KEY}&suffix=tar.gz"
+				printf 'url = "%s"\n' "${url}.sha256" > "$rcfile"
+				curl -fs --config "$rcfile" -o "${edition}.sha256.tmp" || {
+					echo "Failed to download the ${edition} checksum" >&2
+					exit 1
+				}
+				filename=$(awk '{print $2}' "${edition}.sha256.tmp")
+				[[ -n $filename ]] || {
+					echo "Empty ${edition} checksum file" >&2
+					exit 1
+				}
+				mv "${edition}.sha256.tmp" "$filename.sha256"
+				printf 'url = "%s"\n' "$url" > "$rcfile"
+				curl -fs --config "$rcfile" -o "$filename" || {
+					echo "Failed to download ${edition}" >&2
+					exit 1
+				}
+				echo "=== CHECKSUM ==="
+				sha256sum -c "$filename.sha256" || exit 1
+			done
+			rm -f "$rcfile"
+			tar -xf GeoLite2-ASN_*.tar.gz || exit 1
+			tar -xf GeoLite2-City_*.tar.gz || exit 1
+			tar -xf GeoLite2-Country_*.tar.gz || exit 1
+			mkdir /opt/geoip || exit 1
+			cd GeoLite2-ASN_*/ || exit 1
+			mv GeoLite2-ASN.mmdb /opt/geoip/ || exit 1
+			cd ../ || exit 1
+			cd GeoLite2-City_*/ || exit 1
+			mv GeoLite2-City.mmdb /opt/geoip/ || exit 1
+			cd ../ || exit 1
+			cd GeoLite2-Country_*/ || exit 1
+			mv GeoLite2-Country.mmdb /opt/geoip/ || exit 1
+		else
+			echo -e "GeoLite2 database files exists... Skipping download"
+		fi
+	) || return 1
+	# Write GeoIP.conf without putting the key in sed's argv
+	if [[ ! -f /usr/local/etc/GeoIP.conf ]]; then
+		mkdir -p /usr/local/etc || return 1
+		(
+			umask 077
+			{
+				printf '%s\n' '# GeoIP.conf file for geoipupdate (>= 3.1.1).'
+				printf '%s\n' '# AccountID and LicenseKey are from your MaxMind account.'
+				printf 'AccountID %s\n' "$GEOIP2_ACCOUNT_ID"
+				printf 'LicenseKey %s\n' "$GEOIP2_LICENSE_KEY"
+				printf '%s\n' 'EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country'
+			} > /usr/local/etc/GeoIP.conf
+		) || return 1
+		chmod 600 /usr/local/etc/GeoIP.conf || return 1
+	else
+		chmod 600 /usr/local/etc/GeoIP.conf 2>/dev/null || true
+		echo -e "GeoIP.conf file exists... Skipping"
+	fi
+	if [[ ! -f /etc/cron.d/geoipupdate ]]; then
+		# Install crontab to run twice a week
+		echo -e "40 23 * * 6,3 /usr/local/bin/geoipupdate" > /etc/cron.d/geoipupdate || return 1
+	else
+		echo -e "geoipupdate crontab file exists... Skipping"
+	fi
+}
+
+# PageSpeed ships only in the legacy bundle; its PSOL binary is still fetched
+# from Google. Derive the version from the manifest directory, not a pin.
+download_pagespeed_psol() {
+	local dir=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[pagespeed]:-}
+	local version url
+	[[ -n ${MODULE_DIR[pagespeed]:-} && -d $dir ]] || return 1
+	version=${MODULE_DIR[pagespeed]}
+	version=${version#incubator-pagespeed-ngx-}
+	version=${version%-stable}
+	[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+		log_error "Cannot derive the PageSpeed version from '${MODULE_DIR[pagespeed]}'."
+		return 1
+	}
+	(
+		cd "$dir" || exit 1
+		url=https://dl.google.com/dl/page-speed/psol/${version}.tar.gz
+		[ -e scripts/format_binary_url.sh ] && url=$(scripts/format_binary_url.sh PSOL_BINARY_URL)
+		wget "$url" || exit 1
+		tar -xzf "$(basename "$url")" || exit 1
+	) || return 1
+}
+
+# quiche needs a Go toolchain and a recent Rust; keep the pinned rustup-init
+# so the build is reproducible. The manifest supplies the configure flags and
+# apply_module_patches applies quiche/nginx/nginx-1.16.patch.
+build_quiche_deps() {
+	local rustup_arch rustup_sha
+	apt-get install -y golang || return 1
+	case "$(uname -m)" in
+		x86_64)
+			rustup_arch=x86_64-unknown-linux-gnu
+			rustup_sha=$RUSTUP_X86_64_SHA256
+			;;
+		aarch64 | arm64)
+			rustup_arch=aarch64-unknown-linux-gnu
+			rustup_sha=$RUSTUP_AARCH64_SHA256
+			;;
+		*)
+			echo "Unsupported architecture for rustup: $(uname -m)" >&2
+			return 1
+			;;
+	esac
+	download_verified "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_arch}/rustup-init" \
+		"$TEMP_INSTALL_DIR/rustup-init" "$rustup_sha" || return 1
+	chmod 700 "$TEMP_INSTALL_DIR/rustup-init" || return 1
+	"$TEMP_INSTALL_DIR/rustup-init" -y --profile minimal || return 1
+	# shellcheck source=/dev/null
+	source "$HOME/.cargo/env" || return 1
+}
+
+# Run the special build step for one resolved module id. Modules without a
+# handler are simple build-flag modules and need no preparation.
+run_module_handler() {
+	local id=${1:-} dir
+	[[ -n $id ]] || return 1
+	dir=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[$id]:-}
+	case $id in
+		luajit2)
+			( cd "$dir" && make -j "$(nproc)" && make install ) || return 1
+			;;
+		libmaxminddb)
+			( cd "$dir" && ./configure && make -j "$(nproc)" && make install && ldconfig ) || return 1
+			;;
+		openssl)
+			( cd "$dir" && ./config ) || return 1
+			;;
+		libressl)
+			( cd "$dir" &&
+				./configure \
+					LDFLAGS=-lrt \
+					CFLAGS=-fstack-protector-strong \
+					--prefix="$dir/.openssl" \
+					--enable-shared=no &&
+				make install-strip -j "$(nproc)" ) || return 1
+			;;
+		modsecurity)
+			( cd "$dir" && ./build.sh && ./configure && make -j "$(nproc)" && make install ) || return 1
+			mkdir -p "$INSTALL_DIR/modsec" || return 1
+			cp -f "$dir/modsecurity.conf-recommended" "$INSTALL_DIR/modsec/modsecurity.conf" || return 1
+			# Enable ModSecurity in Nginx
+			if [[ $MODSEC_ENABLE == 'y' ]]; then
+				sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' "$INSTALL_DIR/modsec/modsecurity.conf" || return 1
+			fi
+			;;
+		lua-resty-core | lua-resty-lrucache)
+			( cd "$dir" && make install PREFIX=/etc/nginx ) || return 1
+			;;
+		lua-nginx)
+			export LUAJIT_LIB=/usr/local/lib
+			export LUAJIT_INC=/usr/local/include/luajit-2.1
+			NGINX_OPTIONS="$NGINX_OPTIONS --with-ld-opt=-Wl,-rpath,/usr/local/lib --prefix=$INSTALL_DIR"
+			;;
+		geoip2)
+			download_geoip_databases || return 1
+			;;
+		pagespeed)
+			download_pagespeed_psol || return 1
+			;;
+		quiche)
+			build_quiche_deps || return 1
+			;;
+	esac
+}
+
+# Apply the patch modules to the nginx source tree. The fixed order preserves
+# the historical stack: TLS resize, quiche, HTTP/3, then HPACK.
+apply_module_patches() {
+	local src=$TEMP_INSTALL_DIR/nginx-$NGINX_VER file
+	if ! module_resolved tlsdyn && ! module_resolved quiche &&
+		! module_resolved http3 && ! module_resolved hpack && ! module_resolved hpack-http3; then
+		return 0
+	fi
+	[[ -d $src ]] || { log_error "nginx source directory is missing: $src"; return 1; }
+	cd "$src" || return 1
+	if module_resolved tlsdyn; then
+		file=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[tlsdyn]}
+		[[ -f $file ]] || return 1
+		patch -p1 < "$file" || return 1
+	fi
+	if module_resolved quiche; then
+		file=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[quiche]}/nginx/nginx-1.16.patch
+		[[ -f $file ]] || return 1
+		patch -p01 < "$file" || return 1
+	fi
+	if module_resolved http3; then
+		file=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[http3]}
+		[[ -f $file ]] || return 1
+		patch -p01 < "$file" || return 1
+	fi
+	if module_resolved hpack; then
+		file=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[hpack]}
+		[[ -f $file ]] || return 1
+		patch -p1 < "$file" || return 1
+	fi
+	if module_resolved hpack-http3; then
+		file=$TEMP_INSTALL_DIR/modules/${MODULE_DIR[hpack-http3]}
+		[[ -f $file ]] || return 1
+		patch -p1 < "$file" || return 1
+	fi
+}
+
+download_modules() {
+	local id
+
+	# No ids means no bundle and no third-party modules.
+	if [[ -z $MODULES_LIST ]]; then
+		log_debug "No module ids selected; skipping the nginx-modules bundle."
+		return 0
+	fi
+
+	fetch_modules_bundle || { log_error "Could not download or verify the nginx-modules bundle (${MODULES_REV})."; return 1; }
+	load_modules_manifest || { log_error "Invalid or missing modules.conf in the nginx-modules bundle."; return 1; }
+	resolve_modules "${MODULE_ROOTS[@]}" || return 1
+
+	if module_resolved geoip2; then
+		prepare_geoip_credentials || return 1
+	fi
+
+	# Build libraries and download payloads before nginx is configured.
+	for id in "${RESOLVED_MODULES[@]}"; do
+		run_module_handler "$id" || return 1
+	done
+
+	# Patches apply to the extracted nginx source tree.
+	apply_module_patches || return 1
+
+	# The verified manifest supplies the remaining configure flags.
+	append_module_build_args || return 1
+}
+
 # Allow the test suite to source the helpers and option parser without
 # running an install.
 if [[ ${NGINX_INSTALLER_LIB_ONLY:-0} == 1 ]]; then
@@ -941,6 +1311,16 @@ then
   exit 0
 fi
 
+# Keep the informational fallback for an unspecified or unknown SSL value.
+case ${SSL:-} in
+1 | SYSTEM | 2 | OPENSSL | 3 | LIBRESSL) ;;
+*)
+	if ! module_selected openssl && ! module_selected libressl; then
+		echo "SSL unspecified, fallback to system's OpenSSL ($(openssl version | cut -c9-14))"
+	fi
+	;;
+esac
+
 # Validate the requested version before changing the system.
 is_nginx_version "${NGINX_VER:-}" ||
   fatal "Could not determine the nginx version (got '${NGINX_VER:-empty}'). Check access to nginx.org or pass --nginx X.Y.Z."
@@ -989,75 +1369,6 @@ else
   exit 1;
 fi
 
-if [[ $HEADLESS == 'y' ]] && [[ $MODULES_EXTRA == 'y' ]]; then
-	echo -e "${RED}${BALLOT_X} Error: Sorry, choose either headless or modules extra, not both.${NORMAL}"
-  exit 1;
-fi
-
-# Define installation parameters for headless install (fallback if unspecifed)
-if [[ $HEADLESS == 'y' ]]; then
-	# Define default module options
-	PAGESPEED=${PAGESPEED:-n}
-	BROTLI=${BROTLI:-n}
-	HEADERMOD=${HEADERMOD:-n}
-	GEOIP=${GEOIP:-n}
-	GEOIP2_ACCOUNT_ID=${GEOIP2_ACCOUNT_ID:-}
-	GEOIP2_LICENSE_KEY=${GEOIP2_LICENSE_KEY:-}
-	FANCYINDEX=${FANCYINDEX:-n}
-	CACHEPURGE=${CACHEPURGE:-n}
-	SUBFILTER=${SUBFILTER:-n}
-	LUA=${LUA:-n}
-	WEBDAV=${WEBDAV:-n}
-	VTS=${VTS:-n}
-	RTMP=${RTMP:-n}
-	TESTCOOKIE=${TESTCOOKIE:-n}
-	HTTP3=${HTTP3:-n}
-	MODSEC=${MODSEC:-n}
-	REDIS2=${REDIS2:-n}
-	HTTPREDIS=${HTTPREDIS:-n}
-	SRCACHE=${SRCACHE:-n}
-	SETMISC=${SETMISC:-n}
-	NGXECHO=${NGXECHO:-n}
-	HPACK=${HPACK:-n}
-	SSL=${SSL:-1}
-	RM_CONF=${RM_CONF:-n}
-	RM_LOGS=${RM_LOGS:-n}
-fi
-
-# Define installation parameters for headless install (fallback if unspecifed)
-
-if [[ $MODULES_EXTRA == 'y' ]]; then
-	# Define extra module options
-	PAGESPEED=${PAGESPEED:-n}
-	BROTLI=${BROTLI:-n}
-	HEADERMOD=${HEADERMOD:-y}
-	GEOIP=${GEOIP:-n}
-	GEOIP2_ACCOUNT_ID=${GEOIP2_ACCOUNT_ID:-}
-	GEOIP2_LICENSE_KEY=${GEOIP2_LICENSE_KEY:-}
-	FANCYINDEX=${FANCYINDEX:-y}
-	CACHEPURGE=${CACHEPURGE:-y}
-	SUBFILTER=${SUBFILTER:-y}
-	LUA=${LUA:-n}
-	WEBDAV=${WEBDAV:-y}
-	VTS=${VTS:-y}
-	RTMP=${RTMP:-y}
-	TESTCOOKIE=${TESTCOOKIE:-y}
-	HTTP3=${HTTP3:-n}
-	MODSEC=${MODSEC:-n}
-	REDIS2=${REDIS2:-y}
-	HTTPREDIS=${HTTPREDIS:-n}
-	SRCACHE=${SRCACHE:-y}
-	SETMISC=${SETMISC:-y}
-	NGXECHO=${NGXECHO:-y}
-	HPACK=${HPACK:-n}
-	SSL=${SSL:-2}
-	RM_CONF=${RM_CONF:-n}
-	RM_LOGS=${RM_LOGS:-n}
-fi
-
-# The MaxMind key is only used in this shell; keep it out of child environments.
-export -n GEOIP2_LICENSE_KEY 2>/dev/null || true
-
 # Define default options
 NGINX_OPTIONS=${NGINX_OPTIONS:-"
 --sbin-path=/usr/sbin/nginx \
@@ -1073,589 +1384,6 @@ NGINX_OPTIONS=${NGINX_OPTIONS:-"
 --group=nginx \
 --with-cc-opt=-Wno-deprecated-declarations \
 --with-cc-opt=-Wno-ignored-qualifiers"}
-
-
-case $SSL in
-1 | SYSTEM)
-	;;
-
-2 | OPENSSL)
-	OPENSSL=y
-	;;
-3 | LIBRESSL)
-	LIBRESSL=y
-	;;
-*)
-	echo "SSL unspecified, fallback to system's OpenSSL ($(openssl version | cut -c9-14))"
-	;;
-esac
-
-download_modules() {
-
-	# Prefer the verified module bundle; per-module downloads are fallback.
-	if modules_selected; then
-		if [[ $MODULES_SKIP_BUNDLE == 1 ]]; then
-			log_warning "Module bundle skipped; using upstream sources."
-		elif fetch_modules_bundle; then
-			load_module_versions || exit 1
-		else
-			log_warning "Module bundle unavailable; using upstream sources."
-		fi
-	fi
-
-	# PageSpeed
-	if [[ $PAGESPEED == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/incubator-pagespeed-ngx-${NPS_VER}-stable" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://github.com/pagespeed/ngx_pagespeed/archive/v${NPS_VER}-stable.zip
-			unzip v${NPS_VER}-stable.zip
-		fi
-		cd "$TEMP_INSTALL_DIR/modules/incubator-pagespeed-ngx-${NPS_VER}-stable" || exit 1
-		psol_url=https://dl.google.com/dl/page-speed/psol/${NPS_VER}.tar.gz
-		[ -e scripts/format_binary_url.sh ] && psol_url=$(scripts/format_binary_url.sh PSOL_BINARY_URL)
-		wget "${psol_url}"
-		tar -xzvf "$(basename "${psol_url}")"
-	fi
-
-	#Brotli
-	if [[ $BROTLI == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_brotli" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			clone_pinned brotli https://github.com/google/ngx_brotli "$TEMP_INSTALL_DIR/modules/ngx_brotli" || exit 1
-			git -C "$TEMP_INSTALL_DIR/modules/ngx_brotli" submodule update --init --recursive --depth 1 || exit 1
-		fi
-	fi
-
-	# More Headers
-	if [[ $HEADERMOD == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/headers-more-nginx-module-${HEADERMOD_VER}" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://github.com/openresty/headers-more-nginx-module/archive/v${HEADERMOD_VER}.tar.gz
-			tar xaf v${HEADERMOD_VER}.tar.gz
-		fi
-	fi
-
-	# GeoIP
-	if [[ $GEOIP == 'y' ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			# install libmaxminddb
-			if [[ ! -d "libmaxminddb-${LIBMAXMINDDB_VER}" ]]; then
-				wget https://github.com/maxmind/libmaxminddb/releases/download/${LIBMAXMINDDB_VER}/libmaxminddb-${LIBMAXMINDDB_VER}.tar.gz
-				tar xaf libmaxminddb-${LIBMAXMINDDB_VER}.tar.gz
-			fi
-			cd libmaxminddb-${LIBMAXMINDDB_VER}/ || exit 1
-			./configure
-			make -j "$(nproc)"
-			make install
-			ldconfig
-
-			cd ../ || exit 1
-			if [[ ! -d "ngx_http_geoip2_module-${GEOIP2_VER}" ]]; then
-				wget https://github.com/leev/ngx_http_geoip2_module/archive/${GEOIP2_VER}.tar.gz
-				tar xaf ${GEOIP2_VER}.tar.gz
-			fi
-
-			mkdir -p geoip-db
-			cd geoip-db || exit 1
-			# - Download GeoLite2 databases using the license key
-			# - Keep the key out of argv and the log: curl reads the URL from
-			#   a mode-0600 config file instead of the command line
-			# - Verify every download against MaxMind's sha256
-			if [[ ! -d /opt/geoip ]]; then
-				GEOIP2_CURLRC="$TEMP_INSTALL_DIR/modules/geoip-db/.curlrc-$$"
-				( umask 077; : > "$GEOIP2_CURLRC" ) || exit 1
-				for edition in GeoLite2-ASN GeoLite2-City GeoLite2-Country; do
-					echo "=== FETCHING ${edition} ==="
-					GEOIP2_URL="https://download.maxmind.com/app/geoip_download?edition_id=${edition}&license_key=${GEOIP2_LICENSE_KEY}&suffix=tar.gz"
-					printf 'url = "%s"\n' "${GEOIP2_URL}.sha256" > "$GEOIP2_CURLRC"
-					curl -fs --config "$GEOIP2_CURLRC" -o "${edition}.sha256.tmp" || {
-						echo "Failed to download the ${edition} checksum" >&2
-						exit 1
-					}
-					GEOIP2_FILENAME=$(awk '{print $2}' "${edition}.sha256.tmp")
-					[[ -n $GEOIP2_FILENAME ]] || {
-						echo "Empty ${edition} checksum file" >&2
-						exit 1
-					}
-					mv "${edition}.sha256.tmp" "$GEOIP2_FILENAME.sha256"
-					printf 'url = "%s"\n' "$GEOIP2_URL" > "$GEOIP2_CURLRC"
-					curl -fs --config "$GEOIP2_CURLRC" -o "$GEOIP2_FILENAME" || {
-						echo "Failed to download ${edition}" >&2
-						exit 1
-					}
-					echo "=== CHECKSUM ==="
-					sha256sum -c "$GEOIP2_FILENAME.sha256" || exit 1
-				done
-				rm -f "$GEOIP2_CURLRC"
-				tar -xf GeoLite2-ASN_*.tar.gz
-				tar -xf GeoLite2-City_*.tar.gz
-				tar -xf GeoLite2-Country_*.tar.gz
-				mkdir /opt/geoip
-				cd GeoLite2-ASN_*/ || exit 1
-				mv GeoLite2-ASN.mmdb /opt/geoip/
-				cd ../ || exit 1
-				cd GeoLite2-City_*/ || exit 1
-				mv GeoLite2-City.mmdb /opt/geoip/
-				cd ../ || exit 1
-				cd GeoLite2-Country_*/ || exit 1
-				mv GeoLite2-Country.mmdb /opt/geoip/
-			else
-				echo -e "GeoLite2 database files exists... Skipping download"
-			fi
-			# Write GeoIP.conf without putting the key in sed's argv
-			if [[ ! -f /usr/local/etc/GeoIP.conf ]]; then
-				mkdir -p /usr/local/etc
-				(
-					umask 077
-					{
-						printf '%s\n' '# GeoIP.conf file for geoipupdate (>= 3.1.1).'
-						printf '%s\n' '# AccountID and LicenseKey are from your MaxMind account.'
-						printf 'AccountID %s\n' "$GEOIP2_ACCOUNT_ID"
-						printf 'LicenseKey %s\n' "$GEOIP2_LICENSE_KEY"
-						printf '%s\n' 'EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country'
-					} > /usr/local/etc/GeoIP.conf
-				)
-				chmod 600 /usr/local/etc/GeoIP.conf
-			else
-				chmod 600 /usr/local/etc/GeoIP.conf 2>/dev/null || true
-				echo -e "GeoIP.conf file exists... Skipping"
-			fi
-			if [[ ! -f /etc/cron.d/geoipupdate ]]; then
-				# Install crontab to run twice a week
-				echo -e "40 23 * * 6,3 /usr/local/bin/geoipupdate" > /etc/cron.d/geoipupdate
-			else
-				echo -e "geoipupdate crontab file exists... Skipping"
-			fi
-		fi
-
-	# Cache Purge
-	if [[ $CACHEPURGE == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_cache_purge" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			clone_pinned cachepurge https://github.com/FRiCKLE/ngx_cache_purge "$TEMP_INSTALL_DIR/modules/ngx_cache_purge" || exit 1
-		fi
-	fi
-
-	# Nginx Substitutions Filter
-	if [[ $SUBFILTER == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			clone_pinned subfilter https://github.com/yaoweibin/ngx_http_substitutions_filter_module "$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module" || exit 1
-		fi
-	fi
-
-	# Lua
-	if [[ $LUA == 'y' ]]; then
-		# LuaJIT download
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		if [[ ! -d "luajit2-${LUA_JIT_VER}" ]]; then
-			wget https://github.com/openresty/luajit2/archive/v${LUA_JIT_VER}.tar.gz
-			tar xaf v${LUA_JIT_VER}.tar.gz
-		fi
-		cd luajit2-${LUA_JIT_VER} || exit 1
-		make -j "$(nproc)"
-		make install
-
-		# ngx_devel_kit download
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		if [[ ! -d "ngx_devel_kit-${NGINX_DEV_KIT}" ]]; then
-			wget https://github.com/simplresty/ngx_devel_kit/archive/v${NGINX_DEV_KIT}.tar.gz
-			tar xaf v${NGINX_DEV_KIT}.tar.gz
-		fi
-
-		# lua-nginx-module download
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		if [[ ! -d "lua-nginx-module-${LUA_NGINX_VER}" ]]; then
-			wget https://github.com/openresty/lua-nginx-module/archive/v${LUA_NGINX_VER}.tar.gz
-			tar xaf v${LUA_NGINX_VER}.tar.gz
-		fi
-
-		# lua-resty-core download
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		if [[ ! -d "lua-resty-core-${LUA_RESTYCORE_VER}" ]]; then
-			wget https://github.com/openresty/lua-resty-core/archive/v${LUA_RESTYCORE_VER}.tar.gz
-			tar xaf v${LUA_RESTYCORE_VER}.tar.gz
-		fi
-		cd lua-resty-core-${LUA_RESTYCORE_VER} || exit 1
-		make install PREFIX=/etc/nginx
-
-		# lua-resty-lrucache download
-		cd "$TEMP_INSTALL_DIR"/modules || exit 1
-		if [[ ! -d "lua-resty-lrucache-${LUA_RESTYLRUCACHE_VER}" ]]; then
-			wget https://github.com/openresty/lua-resty-lrucache/archive/v${LUA_RESTYLRUCACHE_VER}.tar.gz
-			tar xaf v${LUA_RESTYLRUCACHE_VER}.tar.gz
-		fi
-		cd lua-resty-lrucache-${LUA_RESTYLRUCACHE_VER} || exit 1
-		make install PREFIX=/etc/nginx
-	fi
-
-	# LibreSSL
-	if [[ $LIBRESSL == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/libressl-${LIBRESSL_VER}" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			mkdir libressl-${LIBRESSL_VER}
-			cd libressl-${LIBRESSL_VER} || exit 1
-			wget -qO- http://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${LIBRESSL_VER}.tar.gz | tar xz --strip 1
-		fi
-		cd "$TEMP_INSTALL_DIR/modules/libressl-${LIBRESSL_VER}" || exit 1
-
-		./configure \
-			LDFLAGS=-lrt \
-			CFLAGS=-fstack-protector-strong \
-			--prefix="$TEMP_INSTALL_DIR"/modules/libressl-${LIBRESSL_VER}/.openssl/ \
-			--enable-shared=no
-
-		make install-strip -j "$(nproc)"
-	fi
-
-	# OpenSSL
-	if [[ $OPENSSL == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/openssl-${OPENSSL_VER}" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://www.openssl.org/source/openssl-${OPENSSL_VER}.tar.gz
-			tar xaf openssl-${OPENSSL_VER}.tar.gz
-		fi
-		cd "$TEMP_INSTALL_DIR/modules/openssl-${OPENSSL_VER}" || exit 1
-
-		./config
-	fi
-
-	# ModSecurity
-	if [[ $MODSEC == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ModSecurity" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			clone_pinned modsecurity https://github.com/SpiderLabs/ModSecurity "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
-			cd "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
-			git submodule update --init --recursive --depth 1 || exit 1
-		fi
-		cd "$TEMP_INSTALL_DIR/modules/ModSecurity" || exit 1
-		./build.sh
-		./configure
-		make -j "$(nproc)"
-		make install
-		mkdir -p "$INSTALL_DIR/modsec"
-		download_verified "https://raw.githubusercontent.com/SpiderLabs/ModSecurity/${MODULE_PINS[modsecurity]}/modsecurity.conf-recommended" \
-			"$INSTALL_DIR/modsec/modsecurity.conf" "$MODSEC_CONF_SHA256" || exit 1
-
-		# Enable ModSecurity in Nginx
-		if [[ $MODSEC_ENABLE == 'y' ]]; then
-			sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' "$INSTALL_DIR/modsec/modsecurity.conf"
-		fi
-	fi
-
-	# Download ngx_http_redis
-	if [[ $HTTPREDIS == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_http_redis-${HTTPREDIS_VER}" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget -O "ngx_http_redis-${HTTPREDIS_VER}.tar.gz" "https://github.com/osokin/ngx_http_redis/archive/refs/tags/${HTTPREDIS_VER}.tar.gz"
-			tar xaf ngx_http_redis-${HTTPREDIS_VER}.tar.gz
-		fi
-	fi
-
-	# Download ngx_devel_kit if LUA = no
-	if [[ $SETMISC == 'y' && $LUA == 'n' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ngx_devel_kit-${NGINX_DEV_KIT}" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://github.com/simplresty/ngx_devel_kit/archive/v${NGINX_DEV_KIT}.tar.gz
-			tar xaf v${NGINX_DEV_KIT}.tar.gz
-		fi
-	fi
-
-	# Download echo-nginx-module
-	if [[ $NGXECHO == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/echo-nginx-module-${NGXECHO_VER}" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://github.com/openresty/echo-nginx-module/archive/refs/tags/v${NGXECHO_VER}.tar.gz
-			tar xaf v${NGXECHO_VER}.tar.gz
-		fi
-	fi
-
-	if [[ $ZSTD == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/zstd-nginx-module" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			wget https://github.com/tokers/zstd-nginx-module/archive/refs/tags/${ZSTD_VER}.tar.gz
-			tar xaf ${ZSTD_VER}.tar.gz
-			[[ -d "zstd-nginx-module-${ZSTD_VER}" ]] && mv "zstd-nginx-module-${ZSTD_VER}" zstd-nginx-module
-		fi
-	fi
-
-	# Optional options
-	if [[ $LUA == 'y' ]]; then
-		NGINX_OPTIONS=$(
-			echo " $NGINX_OPTIONS"
-			echo --with-ld-opt="-Wl,-rpath,/usr/local/lib"
-		)
-
-		NGINX_OPTIONS=$(
-			echo " $NGINX_OPTIONS"
-			echo --prefix="$INSTALL_DIR"
-		)
-	fi
-
-	# Optional modules
-	if [[ $LIBRESSL == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --with-openssl="$TEMP_INSTALL_DIR"/modules/libressl-${LIBRESSL_VER}
-		)
-	fi
-
-	if [[ $PAGESPEED == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/incubator-pagespeed-ngx-${NPS_VER}-stable"
-		)
-	fi
-
-	if [[ $BROTLI == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/ngx_brotli"
-		)
-	fi
-
-	if [[ $HEADERMOD == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/headers-more-nginx-module-${HEADERMOD_VER}"
-		)
-	fi
-
-	if [[ $GEOIP == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/ngx_http_geoip2_module-${GEOIP2_VER}"
-		)
-	fi
-
-	if [[ $OPENSSL == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--with-openssl=$TEMP_INSTALL_DIR/modules/openssl-${OPENSSL_VER}"
-		)
-	fi
-
-	if [[ $CACHEPURGE == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/ngx_cache_purge"
-		)
-	fi
-
-	if [[ $SUBFILTER == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/ngx_http_substitutions_filter_module"
-		)
-	fi
-
-	# Lua
-	if [[ $LUA == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/ngx_devel_kit-${NGINX_DEV_KIT}"
-		)
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo "--add-module=$TEMP_INSTALL_DIR/modules/lua-nginx-module-${LUA_NGINX_VER}"
-		)
-	fi
-
-	if [[ $FANCYINDEX == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/fancyindex" ]]; then
-			clone_pinned fancyindex https://github.com/aperezdc/ngx-fancyindex.git "$TEMP_INSTALL_DIR/modules/fancyindex" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/fancyindex
-		)
-	fi
-
-	if [[ $WEBDAV == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/nginx-dav-ext-module" ]]; then
-			clone_pinned dav_ext https://github.com/arut/nginx-dav-ext-module.git "$TEMP_INSTALL_DIR/modules/nginx-dav-ext-module" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --with-http_dav_module --add-module="$TEMP_INSTALL_DIR"/modules/nginx-dav-ext-module
-		)
-	fi
-
-	if [[ $VTS == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/nginx-module-vts" ]]; then
-			clone_pinned vts https://github.com/vozlt/nginx-module-vts.git "$TEMP_INSTALL_DIR/modules/nginx-module-vts" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/nginx-module-vts
-		)
-	fi
-
-	if [[ $RTMP == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/nginx-rtmp-module" ]]; then
-			clone_pinned rtmp https://github.com/arut/nginx-rtmp-module.git "$TEMP_INSTALL_DIR/modules/nginx-rtmp-module" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/nginx-rtmp-module
-		)
-	fi
-
-	if [[ $TESTCOOKIE == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/testcookie-nginx-module" ]]; then
-			clone_pinned testcookie https://github.com/kyprizel/testcookie-nginx-module.git "$TEMP_INSTALL_DIR/modules/testcookie-nginx-module" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/testcookie-nginx-module
-		)
-	fi
-
-	if [[ $MODSEC == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/ModSecurity-nginx" ]]; then
-			clone_pinned modsecurity_nginx https://github.com/SpiderLabs/ModSecurity-nginx.git "$TEMP_INSTALL_DIR/modules/ModSecurity-nginx" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/ModSecurity-nginx
-		)
-	fi
-
-	if [[ $REDIS2 == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/redis2-nginx-module" ]]; then
-			clone_pinned redis2 https://github.com/openresty/redis2-nginx-module.git "$TEMP_INSTALL_DIR/modules/redis2-nginx-module" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/redis2-nginx-module
-		)
-	fi
-
-	if [[ $HTTPREDIS == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/ngx_http_redis-${HTTPREDIS_VER}
-		)
-	fi
-
-	if [[ $SRCACHE == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/srcache-nginx-module" ]]; then
-			clone_pinned srcache https://github.com/openresty/srcache-nginx-module.git "$TEMP_INSTALL_DIR/modules/srcache-nginx-module" || exit 1
-		fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/srcache-nginx-module
-		)
-	fi
-
-	if [[ $SETMISC == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/set-misc-nginx-module" ]]; then
-			clone_pinned set_misc https://github.com/openresty/set-misc-nginx-module.git "$TEMP_INSTALL_DIR/modules/set-misc-nginx-module" || exit 1
-		fi
-	if [[ $LUA == 'n' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-				echo --add-module="$TEMP_INSTALL_DIR"/modules/ngx_devel_kit-${NGINX_DEV_KIT}
-		)
-	fi
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/set-misc-nginx-module
-		)
-	fi
-
-	if [[ $NGXECHO == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/echo-nginx-module-${NGXECHO_VER}
-		)
-	fi
-
-	if [[ $ZSTD == 'y' ]]; then
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --add-module="$TEMP_INSTALL_DIR"/modules/zstd-nginx-module
-		)
-	fi
-
-	# Cloudflare's TLS Dynamic Record Resizing patch
-	if [[ $TLSDYN == 'y' ]]; then
-		download_verified "https://raw.githubusercontent.com/nginx-modules/ngx_http_tls_dyn_size/${TLSDYN_REV}/nginx__dynamic_tls_records_1.17.7%2B.patch" \
-			tcp-tls.patch "$TLSDYN_SHA256" || exit 1
-		patch -p1 < tcp-tls.patch || exit 1
-	fi
-
-	# HTTP3
-	if [[ $HTTP3 == 'y' ]]; then
-		if [[ ! -d "$TEMP_INSTALL_DIR/modules/quiche" ]]; then
-			cd "$TEMP_INSTALL_DIR"/modules || exit 1
-			clone_pinned quiche https://github.com/cloudflare/quiche "$TEMP_INSTALL_DIR/modules/quiche" || exit 1
-			git -C "$TEMP_INSTALL_DIR/modules/quiche" submodule update --init --recursive --depth 1 || exit 1
-		fi
-		# Dependencies for BoringSSL and Quiche
-		apt-get install -y golang
-		# Rust is not packaged at a new enough version, so use a pinned
-		# rustup-init binary and verify it before running.
-		case "$(uname -m)" in
-			x86_64)
-				rustup_arch=x86_64-unknown-linux-gnu
-				rustup_sha=$RUSTUP_X86_64_SHA256
-				;;
-			aarch64 | arm64)
-				rustup_arch=aarch64-unknown-linux-gnu
-				rustup_sha=$RUSTUP_AARCH64_SHA256
-				;;
-			*)
-				echo "Unsupported architecture for rustup: $(uname -m)" >&2
-				exit 1
-				;;
-		esac
-		download_verified "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_arch}/rustup-init" \
-			"$TEMP_INSTALL_DIR/rustup-init" "$rustup_sha" || exit 1
-		chmod 700 "$TEMP_INSTALL_DIR/rustup-init" || exit 1
-		"$TEMP_INSTALL_DIR/rustup-init" -y --profile minimal || exit 1
-		# shellcheck source=/dev/null
-		source "$HOME/.cargo/env"
-
-		cd "$TEMP_INSTALL_DIR"/nginx-${NGINX_VER} || exit 1
-		# Apply actual patch
-		patch -p01 <"$TEMP_INSTALL_DIR"/modules/quiche/nginx/nginx-1.16.patch || exit 1
-
-		# Apply patch for nginx > 1.19.7 (source: https://github.com/cloudflare/quiche/issues/936#issuecomment-857618081)
-		download_verified "https://raw.githubusercontent.com/angristan/nginx-autoinstall/${NGINX_AUTOINSTALL_REV}/patches/nginx-http3-1.19.7.patch" \
-			nginx-http3.patch "$HTTP3_PATCH_SHA256" || exit 1
-		patch -p01 < nginx-http3.patch || exit 1
-
-		NGINX_OPTIONS=$(
-			echo "$NGINX_OPTIONS"
-			echo --with-openssl="$TEMP_INSTALL_DIR"/modules/quiche/quiche/deps/boringssl --with-quiche="$TEMP_INSTALL_DIR"/modules/quiche
-		)
-		NGINX_MODULES=$(
-			echo "$NGINX_MODULES"
-			echo --with-http_v3_module
-		)
-	fi
-
-	# Cloudflare's Cloudflare's full HPACK encoding patch
-	if [[ $HPACK == 'y' ]]; then
-		if [[ $HTTP3 == 'n' ]]; then
-			# Working Patch from https://github.com/hakasenyang/openssl-patch/issues/2#issuecomment-413449809
-			download_verified "https://raw.githubusercontent.com/hakasenyang/openssl-patch/${OPENSSL_PATCH_REV}/nginx_hpack_push_1.15.3.patch" \
-				nginx_http2_hpack.patch "$HPACK_PATCH_SHA256" || exit 1
-		else
-			# Same patch as above but fixed conflicts with the HTTP/3 patch
-			download_verified "https://raw.githubusercontent.com/angristan/nginx-autoinstall/${NGINX_AUTOINSTALL_REV}/patches/nginx_hpack_push_with_http3.patch" \
-				nginx_http2_hpack.patch "$HPACK_HTTP3_PATCH_SHA256" || exit 1
-		fi
-		patch -p1 < nginx_http2_hpack.patch || exit 1
-
-		NGINX_OPTIONS=$(
-			echo "$NGINX_OPTIONS"
-			echo --with-http_v2_hpack_enc
-		)
-	fi
-
-}
 
 configure() {
   ./configure $NGINX_OPTIONS $NGINX_MODULES
@@ -1702,11 +1430,11 @@ install_nginx() {
       # shellcheck disable=SC2086
       ${INSTALL} ${i} >>"${RUN_LOG}" 2>&1
     done
-		if [[ $MODSEC == 'y' ]]; then
+		if module_selected modsecurity || module_selected modsecurity-nginx; then
 			apt-get install -y apt-utils libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libyajl-dev pkgconf
 		fi
 
-		if [[ $GEOIP == 'y' ]]; then
+		if module_selected geoip2; then
 			if grep -q "# See /etc/apt/sources.list.d/debian.sources" /etc/apt/sources.list
 			then
 				sources_list=/etc/apt/sources.list.d/debian.sources
@@ -1722,7 +1450,7 @@ install_nginx() {
 			apt-get update
 			apt-get install -y geoipupdate
 		fi
-		if [[ $ZSTD == "y" ]]; then
+		if module_selected zstd; then
 			apt-get install -y zstd
 		fi
   fi
@@ -1766,7 +1494,7 @@ install_nginx() {
       printf "%s \\n" "${GREEN}▣▣▣${YELLOW}▣${CYAN}□□${NORMAL} Phase ${YELLOW}4${NORMAL} of ${GREEN}6${NORMAL}: Setup nginx"
       log_debug "Configuring..."
 			sed -i '/ngx_write_stderr("built by " NGX_COMPILER NGX_LINEFEED);/i\        ngx_write_stderr("built with Nginx Installer @tmiland" NGX_LINEFEED);' src/core/nginx.c
-			if [[ $LUA == 'y' ]]; then
+			if module_resolved lua-nginx; then
 				export LUAJIT_LIB=/usr/local/lib
 				export LUAJIT_INC=/usr/local/include/luajit-2.1
 			fi
@@ -1857,7 +1585,7 @@ EOF
 			log_success "Installation finished"
 			# remove debugging symbols
 			strip -s /usr/sbin/nginx
-			if [[ -d $INSTALL_DIR/conf.d && $LUA == 'y' ]]; then
+			if [[ -d $INSTALL_DIR/conf.d ]] && module_resolved lua-nginx; then
 				# add necessary `lua_package_path` directive to `nginx.conf`, in the http context
 				tee $INSTALL_DIR/conf.d/lua_package_path.conf <<EOF >>"${RUN_LOG}" 2>&1
 lua_package_path "$INSTALL_DIR/lib/lua/?.lua;;";

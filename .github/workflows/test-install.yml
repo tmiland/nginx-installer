@@ -173,22 +173,8 @@ jobs:
       HEADLESS: "y"
       MODULES_PROFILE: ${{ matrix.profile }}
       MODULES_REV: v2026.11.2
+      MODULES: "headers-more,fancyindex,cachepurge,subfilter,vts,webdav,rtmp,testcookie,httpredis,srcache,set-misc,lua-nginx,lua-resty-core,lua-resty-lrucache,echo,zstd"
       NGINX_VERSION: ${{ github.event.inputs.nginx_version || '1.30.7' }}
-      HEADERMOD: "y"
-      FANCYINDEX: "y"
-      CACHEPURGE: "y"
-      SUBFILTER: "y"
-      VTS: "y"
-      WEBDAV: "y"
-      RTMP: "y"
-      TESTCOOKIE: "y"
-      REDIS2: "n"
-      HTTPREDIS: "y"
-      SRCACHE: "y"
-      SETMISC: "y"
-      LUA: "y"
-      NGXECHO: "y"
-      ZSTD: "y"
     steps:
       - name: Install container prerequisites
         run: |
